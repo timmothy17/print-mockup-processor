@@ -1,7 +1,7 @@
 import logging
 import traceback
 from io import BytesIO
-from PIL import Image, ImageEnhance, ImageDraw, ImageStat, ImageOps
+from PIL import Image, ImageEnhance, ImageDraw, ImageStat, ImageOps, ImageChops  
 from psd_tools import PSDImage
 import cv2
 import numpy as np
@@ -11,1147 +11,1266 @@ import gc  # For garbage collection
 from s3_handler import S3Handler
 from renderform_handler import RenderformHandler
 
-# Initialize handlers
 logger = logging.getLogger(__name__)
+
+# Initialize handlers
 s3_handler = S3Handler()
 renderform_handler = RenderformHandler()
 
-def apply_perspective_transform(image, src_points, dst_points, output_size):
-    """Apply perspective transform to an image with proper alpha handling"""
-    # Convert PIL image to numpy array
-    img_array = np.array(image)
-    
-    # Determine if the image has an alpha channel
-    has_alpha = len(img_array.shape) == 3 and img_array.shape[2] == 4
-    
-    if has_alpha:
-        # Split the image into color and alpha channels
-        rgb = img_array[:, :, :3]
-        alpha = img_array[:, :, 3]
-    else:
-        # If no alpha, just use the RGB channels and create a full opacity alpha
-        rgb = img_array
-        alpha = np.full((img_array.shape[0], img_array.shape[1]), 255, dtype=np.uint8)
-    
-    # Convert points to numpy arrays
-    src_np = np.array(src_points, dtype=np.float32)
-    dst_np = np.array(dst_points, dtype=np.float32)
-    
-    # Calculate the perspective transform matrix
-    transform_matrix = cv2.getPerspectiveTransform(src_np, dst_np)
-    
-    # Warp the color channels
-    warped_rgb = cv2.warpPerspective(
-        rgb, 
-        transform_matrix, 
-        output_size, 
-        flags=cv2.INTER_LINEAR, 
-        borderMode=cv2.BORDER_CONSTANT,
-        borderValue=[0, 0, 0]  # Black border
-    )
-    
-    # Warp the alpha channel separately
-    warped_alpha = cv2.warpPerspective(
-        alpha, 
-        transform_matrix, 
-        output_size, 
-        flags=cv2.INTER_LINEAR, 
-        borderMode=cv2.BORDER_CONSTANT,
-        borderValue=0  # Transparent border
-    )
-    
-    # Combine RGB and alpha back together
-    warped_rgba = np.zeros((output_size[1], output_size[0], 4), dtype=np.uint8)
-    warped_rgba[:, :, :3] = warped_rgb
-    warped_rgba[:, :, 3] = warped_alpha
-    
-    # Convert back to PIL image
-    return Image.fromarray(warped_rgba)
+# ==========================================
+# GEOMETRIC TRANSFORMATION UTILITIES
+# ==========================================
 
-def extract_surrounding_region(background_image, transform_points, expansion_factor=0.5):
-    """
-    Extract a region surrounding (but excluding) the artwork placement area.
+class GeometricProcessor:
+    """Handles all geometric transformations and coordinate calculations."""
     
-    Args:
-        background_image: PIL Image of the background
-        transform_points: List of (x,y) tuples defining the placement area
-        expansion_factor: How much to expand the bounding box (0.5 = 50% expansion)
+    @staticmethod
+    def calculate_frame_region_with_padding(transform_points, padding=4):
+        """
+        Calculate the bounding box of the frame region with padding.
         
-    Returns:
-        PIL Image containing the surrounding region
-    """
-    try:
-        # Ensure transform_points are in the right format (tuples or lists)
-        points = []
-        for point in transform_points:
-            if isinstance(point, (list, tuple)) and len(point) >= 2:
-                points.append((float(point[0]), float(point[1])))
-            else:
-                raise ValueError(f"Invalid point format: {point}")
-                
-        # Calculate the bounding box of the transform points
-        x_coords = [p[0] for p in points]
-        y_coords = [p[1] for p in points]
-        min_x, max_x = min(x_coords), max(x_coords)
-        min_y, max_y = min(y_coords), max(y_coords)
-        
-        # Calculate center point
-        center_x = (min_x + max_x) / 2
-        center_y = (min_y + max_y) / 2
-        
-        # Calculate width and height of the original bounding box
-        width = max_x - min_x
-        height = max_y - min_y
-        
-        # Calculate expanded bounding box (with expansion_factor)
-        expanded_width = width * (1 + expansion_factor * 2)  # Expand on both sides
-        expanded_height = height * (1 + expansion_factor * 2)
-        
-        # Calculate expanded bounds, ensuring they stay within image dimensions
-        exp_min_x = max(0, int(center_x - expanded_width / 2))
-        exp_max_x = min(background_image.width, int(center_x + expanded_width / 2))
-        exp_min_y = max(0, int(center_y - expanded_height / 2))
-        exp_max_y = min(background_image.height, int(center_y + expanded_height / 2))
-        
-        # Create a mask for the expanded region
-        mask = Image.new('L', background_image.size, 0)
-        mask_draw = ImageDraw.Draw(mask)
-        
-        # Fill the expanded rectangle
-        mask_draw.rectangle([(exp_min_x, exp_min_y), (exp_max_x, exp_max_y)], fill=255)
-        
-        # Now subtract the original artwork area by filling it with black
-        mask_draw.polygon(points, fill=0)
-        
-        # Use the mask to extract the region
-        surrounding_region = Image.new('RGBA', background_image.size, (0, 0, 0, 0))
-        surrounding_region.paste(background_image, (0, 0), mask)
-        
-        # Crop to the expanded bounds
-        cropped_region = surrounding_region.crop((exp_min_x, exp_min_y, exp_max_x, exp_max_y))
-        
-        # Safety check for empty images
-        if cropped_region.size[0] <= 1 or cropped_region.size[1] <= 1 or cropped_region.getextrema()[0][1] == 0:
-            logger.warning("Extracted surrounding region is too small or empty, using full background")
-            # Use a portion of the background instead
-            full_width, full_height = background_image.size
-            return background_image.crop((0, 0, min(full_width, 800), min(full_height, 800)))
+        Args:
+            transform_points: List of (x,y) tuples defining the frame
+            padding: Fixed padding in pixels around the frame region
             
-        return cropped_region
-    except Exception as e:
-        logger.error(f"Error extracting surrounding region: {str(e)}")
-        logger.error(traceback.format_exc())
-        # Return a portion of the background as fallback
-        return background_image
-
-def analyze_image_colors(image):
-    """
-    Analyze key color statistics of an image.
-    
-    Args:
-        image: PIL Image to analyze
-    
-    Returns:
-        Dictionary with color statistics
-    """
-    try:
-        # Convert to RGB for analysis
-        img_rgb = image.convert('RGB')
-        
-        # Use PIL's ImageStat for efficient calculations
-        stats = ImageStat.Stat(img_rgb)
-        
-        # Get mean values per channel
-        r_mean, g_mean, b_mean = stats.mean
-        
-        # Calculate brightness (0-255)
-        brightness = sum(stats.mean) / 3
-        
-        # Calculate color variance as a measure of colorfulness
-        r_var, g_var, b_var = stats.var
-        colorfulness = sum([r_var, g_var, b_var]) / 3
-        
-        # Calculate contrast
-        extrema = img_rgb.getextrema()
-        r_min, r_max = extrema[0]
-        g_min, g_max = extrema[1]
-        b_min, b_max = extrema[2]
-        contrast = (r_max - r_min + g_max - g_min + b_max - b_min) / 3
-        
-        # Calculate saturation (0-1 range)
-        # For each pixel, saturation is (max-min)/max if max>0 else 0
-        # We use an approximation based on the mean values
-        max_mean = max(r_mean, g_mean, b_mean)
-        min_mean = min(r_mean, g_mean, b_mean)
-        
-        saturation = 0
-        if max_mean > 0:
-            saturation = (max_mean - min_mean) / max_mean
-        
-        # Calculate color temperature (warm vs cool)
-        # Simple approximation: ratio of red to blue
-        color_temp = r_mean / (b_mean if b_mean > 0.1 else 0.1)
-        
-        # Calculate dominant color tone
-        if r_mean > g_mean and r_mean > b_mean:
-            dominant_tone = "red"
-        elif g_mean > r_mean and g_mean > b_mean:
-            dominant_tone = "green"
-        else:
-            dominant_tone = "blue"
-        
-        # Detect if image is mostly monochrome
-        color_variance = abs(r_mean - g_mean) + abs(r_mean - b_mean) + abs(g_mean - b_mean)
-        is_monochrome = color_variance < 30  # Threshold for considering image monochromatic
-        
-        return {
-            'brightness': brightness,
-            'saturation': saturation,
-            'contrast': contrast,
-            'colorfulness': colorfulness,
-            'color_temp': color_temp,
-            'r_mean': r_mean,
-            'g_mean': g_mean,
-            'b_mean': b_mean,
-            'dominant_tone': dominant_tone,
-            'is_monochrome': is_monochrome
-        }
-    except Exception as e:
-        logger.error(f"Error analyzing image colors: {str(e)}")
-        # Return default values as fallback
-        return {
-            'brightness': 128,
-            'saturation': 0.5,
-            'contrast': 128,
-            'colorfulness': 5000,
-            'color_temp': 1.0,
-            'r_mean': 128,
-            'g_mean': 128,
-            'b_mean': 128,
-            'dominant_tone': "neutral",
-            'is_monochrome': False
-        }
-
-def calculate_adjustments(artwork_stats, target_stats, config=None):
-    """
-    Calculate adjustment factors based on color statistics with dynamic constraints.
-    Improved handling for color-dominant artworks and multiply blend mode.
-    
-    Args:
-        artwork_stats: Color statistics of the artwork
-        target_stats: Color statistics of the target region
-        config: Optional configuration parameters
-    
-    Returns:
-        Dictionary with adjustment factors
-    """
-    # Get config or use defaults
-    config = config or {}
-    
-    # Calculate the "difference factor" between the images (0-1 range)
-    brightness_diff = abs(artwork_stats['brightness'] - target_stats['brightness']) / 255
-    saturation_diff = abs(artwork_stats['saturation'] - target_stats['saturation'])
-    color_temp_diff = abs(artwork_stats['color_temp'] - target_stats['color_temp']) / max(artwork_stats['color_temp'], target_stats['color_temp'])
-    
-    # Overall difference score (0-1 range)
-    difference_score = (brightness_diff + saturation_diff + color_temp_diff) / 3
-    
-    # Calculate dynamic adjustment ranges based on difference
-    # Higher difference = wider adjustment range allowed
-    base_range = config.get('base_adjustment_range', 0.2)
-    max_range = config.get('max_adjustment_range', 0.5)
-    
-    adjustment_range = base_range + (difference_score * (max_range - base_range))
-    
-    # Calculate dynamic min/max constraints
-    min_adjustment = max(0.6, 1.0 - adjustment_range)  # Never go below 0.6
-    max_adjustment = min(1.4, 1.0 + adjustment_range)  # Never go above 1.4
-    
-    # Determine color dominance
-    r_mean, g_mean, b_mean = artwork_stats['r_mean'], artwork_stats['g_mean'], artwork_stats['b_mean']
-    max_channel = max(r_mean, g_mean, b_mean)
-    
-    # Calculate purity/dominance of each channel (0-1 range)
-    # Higher value means the channel is more dominant
-    r_dominance = r_mean / max_channel if max_channel > 0 else 0
-    g_dominance = g_mean / max_channel if max_channel > 0 else 0
-    b_dominance = b_mean / max_channel if max_channel > 0 else 0
-    
-    # Calculate overall color purity/dominance score
-    # This will be high when one channel significantly outweighs others
-    color_purity = max(
-        abs(r_dominance - g_dominance),
-        abs(r_dominance - b_dominance),
-        abs(g_dominance - b_dominance)
-    )
-    
-    # Determine which channel is dominant
-    dominant_channel = 'r' if r_mean == max_channel else ('g' if g_mean == max_channel else 'b')
-    
-    # Threshold for considering an image "color-dominant"
-    is_color_dominant = color_purity > 0.3 and max_channel > 100
-    is_moderate_dominant = color_purity > 0.15 and max_channel > 100
-    
-    # Special check for red content that might not trigger full dominance
-    has_significant_red = r_mean > 70 and r_mean > g_mean * 1.3 and r_mean > b_mean * 1.3
-    
-    if is_color_dominant:
-        logger.info(f"Detected color-dominant artwork (channel: {dominant_channel}, purity: {color_purity:.2f})")
-        # Allow wider adjustment range for dominant colors to preserve their vibrancy
-        max_adjustment = min(1.5, max_adjustment * 1.1)
-    elif is_moderate_dominant and has_significant_red:
-        logger.info(f"Detected moderate red dominance (purity: {color_purity:.2f})")
-    
-    # Calculate brightness adjustment - use weighted approach
-    brightness_factor = 0.8 + 0.2 * (target_stats['brightness'] / artwork_stats['brightness'])
-    
-    # For color-dominant images, preserve brightness differently based on dominant channel
-    if is_color_dominant:
-        if dominant_channel == 'r':
-            # Red-dominant: preserve more brightness
-            brightness_factor = min(brightness_factor * 1.05, 1.0)
-        elif dominant_channel == 'b':
-            # Blue-dominant: more conservative brightness preservation
-            brightness_factor = min(brightness_factor * 1.05, 1.0)
-        else:  # green or other
-            brightness_factor = min(brightness_factor * 1.05, 1.0)
-    
-    # Special handling for red text on white background in multiply mode
-    if config.get('blend_mode') == 'multiply' and has_significant_red and not is_color_dominant:
-        # Preserve more brightness for red text
-        brightness_factor = min(max(brightness_factor, 0.94), 1.0)
-    
-    brightness_factor = max(min_adjustment, min(max_adjustment, brightness_factor))
-    
-    # Calculate saturation adjustment with more conservative approach
-    if artwork_stats['saturation'] > 0.05:  # Avoid division by very small numbers
-        # Calculate raw saturation factor
-        raw_saturation_factor = target_stats['saturation'] / artwork_stats['saturation']
-        
-        # For multiply blend mode, approach saturation differently
-        if config.get('blend_mode') == 'multiply':
-            if raw_saturation_factor > 1.0:
-                # Never increase saturation for multiply blend
-                saturation_factor = 1.0
-            else:
-                # For decreases, use a gentler approach based on how vibrant the color is
-                # More vibrant colors (higher saturation) get less reduction
-                reduction_strength = max(0.6, min(0.9, 1.0 - artwork_stats['saturation']))
-                
-                # For color-dominant images, be even more conservative with saturation reduction
-                if is_color_dominant:
-                    if dominant_channel == 'r':
-                        reduction_strength *= 0.7  # Very conservative for red
-                    elif dominant_channel == 'b':
-                        reduction_strength *= 0.85  # Less conservative for blue
-                    else:
-                        reduction_strength *= 0.8  # Moderate for green
-                # Special case for red text/elements on white 
-                elif has_significant_red:
-                    reduction_strength *= 0.75  # Conservative for significant red elements
-                    
-                saturation_factor = 1.0 - ((1.0 - raw_saturation_factor) * reduction_strength)
-        else:
-            # For other blend modes, use the existing dampening logic
-            if raw_saturation_factor > 1.0:
-                saturation_factor = 1.0 + (raw_saturation_factor - 1.0) * 0.7
-            else:
-                saturation_factor = raw_saturation_factor
-    else:
-        saturation_factor = 1.0  # No adjustment for nearly monochrome images
-    
-    # For color-dominant images, adjust saturation differently based on dominant channel
-    if is_color_dominant:
-        if dominant_channel == 'r':
-            saturation_factor = max(saturation_factor, 0.85)  # Lower minimum
-            saturation_factor *= 1.05  # Reduced boost
-        elif dominant_channel == 'b':
-            saturation_factor = max(saturation_factor, 0.85)
-            saturation_factor *= 1.02  # Very subtle boost for blue
-        else:  # green
-            saturation_factor = max(saturation_factor, 0.87)
-            saturation_factor *= 1.05  # Moderate boost for green
-    # Special handling for red text/elements on white background
-    elif has_significant_red and config.get('blend_mode') == 'multiply':
-        saturation_factor = max(saturation_factor, 0.88)
-        saturation_factor *= 1.02  # Very subtle boost
-    
-    saturation_factor = max(min_adjustment, min(max_adjustment, saturation_factor))
-    
-    # Calculate color temperature adjustment
-    temp_factor = target_stats['color_temp'] / (artwork_stats['color_temp'] if artwork_stats['color_temp'] > 0.1 else 0.1)
-    
-    # For multiply blend mode, handle temperature more subtly
-    if config.get('blend_mode') == 'multiply':
-        # Apply a very slight warming to all multiply blends
-        # This helps with the white areas needing a bit more warmth
-        temp_bias = 1.04  # Warmer bias (> 1.0 = warmer) - increased from 1.03 for better white areas
-        
-        # For blue-dominant images, use a stronger warming bias
-        if is_color_dominant and dominant_channel == 'b':
-            temp_bias = 1.05  # Stronger warming for blue
-            
-        temp_factor = temp_factor * 0.7 + temp_bias * 0.3
-    
-    # Calculate RGB adjustments to shift color temperature
-    r_shift = 1.0
-    g_shift = 1.0
-    b_shift = 1.0
-    
-    if temp_factor > 1.05:  # Target is warmer
-        # Use a gentler approach for warming
-        warming_amount = (temp_factor - 1.0) * 0.7
-        r_shift = 1.0 + warming_amount * 0.2
-        g_shift = 1.0 + warming_amount * 0.1
-        b_shift = max(min_adjustment, 1.0 - warming_amount * 0.2)
-    elif temp_factor < 0.95:  # Target is cooler
-        # Use a gentler approach for cooling
-        cooling_amount = (1.0 - temp_factor) * 0.7
-        r_shift = max(min_adjustment, 1.0 - cooling_amount * 0.2)
-        b_shift = 1.0 + cooling_amount * 0.2
-    
-    # For color-dominant images, preserve the dominant channel
-    if is_color_dominant:
-        if dominant_channel == 'r':
-            r_shift = max(r_shift, 1.0)  # Never reduce dominant red
-            if r_shift == 1.0:
-                r_shift = 1.05  # Slightly boost red
-        elif dominant_channel == 'g':
-            g_shift = max(g_shift, 1.0)  # Never reduce dominant green
-            if g_shift == 1.0:
-                g_shift = 1.05  # Slightly boost green
-        elif dominant_channel == 'b':
-            b_shift = max(b_shift, 1.0)  # Never reduce dominant blue
-            if b_shift == 1.0:
-                b_shift = 1.05  # Slightly boost blue
-    
-    # Special handling for red text on white in multiply mode
-    if has_significant_red and config.get('blend_mode') == 'multiply' and not is_color_dominant:
-        r_shift = max(r_shift, 1.01)  # Slight boost to red
-    
-    # Calculate tint adjustment based on dominant colors
-    r_tint = target_stats['r_mean'] / 128
-    g_tint = target_stats['g_mean'] / 128
-    b_tint = target_stats['b_mean'] / 128
-    
-    # Normalize the tint values to preserve overall brightness
-    tint_avg = (r_tint + g_tint + b_tint) / 3
-    if tint_avg > 0:
-        r_tint = r_tint / tint_avg
-        g_tint = g_tint / tint_avg
-        b_tint = b_tint / tint_avg
-    
-    # Calculate how different the artwork's color is from the background
-    color_difference = (
-        abs(artwork_stats['r_mean'] - target_stats['r_mean']) +
-        abs(artwork_stats['g_mean'] - target_stats['g_mean']) +
-        abs(artwork_stats['b_mean'] - target_stats['b_mean'])
-    ) / (3 * 255)  # Normalize to 0-1 range
-    
-    # Use higher threshold for multiply blend mode
-    if config.get('blend_mode') == 'multiply':
-        tint_threshold = 0.4  # Even higher threshold for multiply blend
-    else:
-        tint_threshold = 0.25  # Standard high threshold
-    
-    max_tint = 0.1  # Very subtle maximum tint
-    
-    if color_difference < tint_threshold:
-        tint_weight = 0  # No tint if the colors are already somewhat close
-    else:
-        # Use squared scaling for very subtle graduation
-        tint_scale = ((color_difference - tint_threshold) / (1 - tint_threshold)) ** 2
-        tint_weight = max_tint * tint_scale
-    
-    # For multiply blend mode, further reduce tint effect
-    if config.get('blend_mode') == 'multiply':
-        tint_weight *= 0.5  # Half the tint effect for multiply blend
-    
-    # For very bright areas, further reduce tinting
-    if artwork_stats['brightness'] > 180:
-        tint_weight *= 0.5  # Halve the tint effect for bright areas
-    
-    # For color-dominant images, reduce tint weight to preserve original color
-    if is_color_dominant:
-        # Reduce tint more for red than blue (red needs more preservation)
-        if dominant_channel == 'r':
-            tint_weight *= 0.6
-        elif dominant_channel == 'b':
-            tint_weight *= 0.7
-        else:
-            tint_weight *= 0.65
-    # Special case for red text
-    elif has_significant_red:
-        tint_weight *= 0.7
-        
-    # Combine temperature shift with tint
-    r_adjust = (r_shift * (1 - tint_weight)) + (r_tint * tint_weight)
-    g_adjust = (g_shift * (1 - tint_weight)) + (g_tint * tint_weight)
-    b_adjust = (b_shift * (1 - tint_weight)) + (b_tint * tint_weight)
-    
-    # Additional boost for dominant channel in color-dominant images
-    if is_color_dominant:
-        if dominant_channel == 'r':
-            r_adjust *= 1.05  # Reduced boost (was 1.1)
-            g_adjust *= 0.98  # Slightly reduce green to enhance red
-            b_adjust *= 0.98  # Slightly reduce blue to enhance red
-        elif dominant_channel == 'g':
-            g_adjust *= 1.08  # Boost green to preserve vibrancy
-            r_adjust *= 0.98  # Slightly reduce red to enhance green
-            b_adjust *= 0.98  # Slightly reduce blue to enhance green
-        elif dominant_channel == 'b':
-            b_adjust *= 1.06  # More modest boost for blue (compared to red)
-            r_adjust *= 0.98  # Slightly reduce red to enhance blue
-            g_adjust *= 0.98  # Slightly reduce green to enhance blue
-    # Special handling for red text on white background
-    elif has_significant_red and config.get('blend_mode') == 'multiply':
-        r_adjust *= 1.03  # Subtle boost for red channel
-    
-    # For multiply blend mode, enforce a warmer white balance - REGARDLESS of color dominance
-    if config.get('blend_mode') == 'multiply':
-        # Create a consistent warm adjustment (more red, slightly more green, less blue)
-        warm_r = 1.06  # Boost red (increased from 1.05 for better white warmth) 
-        warm_g = 1.03  # Slightly boost green (increased from 1.02)
-        warm_b = 0.94  # Reduce blue (reduced from 0.95 for better white warmth)
-        
-        # For blue-dominant images, apply even stronger warming to counteract the coolness
-        if is_color_dominant and dominant_channel == 'b':
-            warm_r = 1.07  # Stronger red boost for blue images
-            warm_g = 1.03  # Stronger green boost for blue images
-            warm_b = 0.93  # Stronger blue reduction for blue images
-        
-        # Mix these warm adjustments with the calculated RGB values
-        # Use a stronger influence for very bright areas
-        if artwork_stats['brightness'] > 220:  # Very bright whites
-            r_adjust = r_adjust * 0.3 + warm_r * 0.7  # Stronger warming for very bright whites
-            g_adjust = g_adjust * 0.3 + warm_g * 0.7
-            b_adjust = b_adjust * 0.3 + warm_b * 0.7
-        elif artwork_stats['brightness'] > 200:
-            r_adjust = r_adjust * 0.4 + warm_r * 0.6
-            g_adjust = g_adjust * 0.4 + warm_g * 0.6
-            b_adjust = b_adjust * 0.4 + warm_b * 0.6
-        elif artwork_stats['brightness'] > 150:
-            r_adjust = r_adjust * 0.6 + warm_r * 0.4
-            g_adjust = g_adjust * 0.6 + warm_g * 0.4
-            b_adjust = b_adjust * 0.6 + warm_b * 0.4
-        else:
-            # For darker areas, use a lighter touch with warming
-            r_adjust = r_adjust * 0.8 + warm_r * 0.2
-            g_adjust = g_adjust * 0.8 + warm_g * 0.2
-            b_adjust = b_adjust * 0.8 + warm_b * 0.2
-    
-    # Improved channel balancing for multiply blend mode
-    if config.get('blend_mode') == 'multiply':
-        # For multiply blend, ensure all channels are at least 0.95 to prevent color casts
-        r_adjust = max(0.95, r_adjust)
-        g_adjust = max(0.95, g_adjust)
-        b_adjust = max(0.95, b_adjust)
-        
-        # If any channel is significantly lower, bring them closer together
-        min_adjust = min(r_adjust, g_adjust, b_adjust)
-        max_adjust = max(r_adjust, g_adjust, b_adjust)
-        
-        if max_adjust - min_adjust > 0.05:
-            # Calculate a balanced adjustment that preserves relative relationships
-            # but reduces the extreme differences
-            avg_adjust = (r_adjust + g_adjust + b_adjust) / 3
-            
-            # Move each adjustment closer to the average
-            # But use different balancing for different colors
-            if is_color_dominant:
-                if dominant_channel == 'r':
-                    balance_factor = 0.5  # Less aggressive balancing for red
-                elif dominant_channel == 'b':
-                    balance_factor = 0.7  # More aggressive balancing for blue
+        Returns:
+            Tuple of (min_x, min_y, max_x, max_y) defining the region to process
+        """
+        try:
+            # Ensure transform_points are in the right format
+            points = []
+            for point in transform_points:
+                if isinstance(point, (list, tuple)) and len(point) >= 2:
+                    points.append((float(point[0]), float(point[1])))
                 else:
-                    balance_factor = 0.6  # Standard balancing for other colors
-            else:
-                # For red text on white, use less balancing to preserve red
-                if has_significant_red:
-                    balance_factor = 0.5  # Less balancing for red text
-                else:
-                    balance_factor = 0.6  # Standard balancing for non-dominant colors
+                    raise ValueError(f"Invalid point format: {point}")
+            
+            if len(points) < 3:
+                raise ValueError("Need at least 3 points to define a frame region")
                 
-            r_adjust = r_adjust * (1 - balance_factor) + avg_adjust * balance_factor
-            g_adjust = g_adjust * (1 - balance_factor) + avg_adjust * balance_factor
-            b_adjust = b_adjust * (1 - balance_factor) + avg_adjust * balance_factor
-    else:
-        # For non-multiply blends, use the existing balancing code
-        avg_adjust = (r_adjust + g_adjust + b_adjust) / 3
-        if abs(r_adjust - avg_adjust) > 0.1 or abs(g_adjust - avg_adjust) > 0.1 or abs(b_adjust - avg_adjust) > 0.1:
-            # Move each adjustment closer to the average
-            # But use different balancing for different colors
-            if is_color_dominant:
-                if dominant_channel == 'r':
-                    balance_factor = 0.2  # Less aggressive balancing for red
-                elif dominant_channel == 'b':
-                    balance_factor = 0.3  # Standard balancing for blue
-                else:
-                    balance_factor = 0.25  # Moderate balancing for other colors
-            else:
-                # For red text on white, use less balancing to preserve red
-                if has_significant_red:
-                    balance_factor = 0.2  # Less balancing for red text
-                else:
-                    balance_factor = 0.3  # Standard balancing for non-dominant colors
-                
-            r_adjust = r_adjust * (1 - balance_factor) + avg_adjust * balance_factor
-            g_adjust = g_adjust * (1 - balance_factor) + avg_adjust * balance_factor
-            b_adjust = b_adjust * (1 - balance_factor) + avg_adjust * balance_factor
-    
-    # Clamp the channel adjustments
-    r_adjust = max(min_adjustment, min(max_adjustment, r_adjust))
-    g_adjust = max(min_adjustment, min(max_adjustment, g_adjust))
-    b_adjust = max(min_adjustment, min(max_adjustment, b_adjust))
-    
-    # Increase contrast slightly if adding to a high-contrast background
-    contrast_factor = 1.0
-    if target_stats['contrast'] > 100:  # High contrast background
-        contrast_factor = 1.1  # Subtle increase
-    
-    # For color-dominant images, adjust contrast differently based on dominant channel
-    if is_color_dominant:
-        if dominant_channel == 'r':
-            contrast_factor *= 1.03  # Additional contrast to make reds pop
-        elif dominant_channel == 'b':
-            contrast_factor *= 1.01  # Very subtle contrast for blues
-        else:
-            contrast_factor *= 1.02  # Moderate contrast for other colors
-    
-    # For monochrome artwork being placed on colorful backgrounds
-    # Add a slight tint matching the background
-    color_factor = 1.0
-    if artwork_stats['is_monochrome'] and not target_stats['is_monochrome']:
-        color_factor = 1.1  # Slightly increase colorfulness (reduced from 1.2)
-    
-    # If artwork is much more colorful than background, tone it down a bit more
-    if artwork_stats['colorfulness'] > target_stats['colorfulness'] * 2:
-        # But less aggressively for color-dominant images
-        if is_color_dominant:
-            if dominant_channel == 'r':
-                saturation_factor *= 0.92  # Less reduction for reds
-            elif dominant_channel == 'b':
-                saturation_factor *= 0.85  # Standard reduction for blues
-            else:
-                saturation_factor *= 0.88  # Moderate reduction for other colors
-        else:
-            saturation_factor *= 0.85  # Standard saturation reduction
-    
-    # Calculate overall vibrancy adjustment (combination of saturation and contrast)
-    vibrancy_factor = (saturation_factor + contrast_factor) / 2
-    
-    # For color-dominant images, adjust vibrancy based on dominant channel
-    if is_color_dominant:
-        if dominant_channel == 'r':
-            vibrancy_factor *= 1.02  # Reduced vibrancy boost for reds
-        elif dominant_channel == 'b':
-            vibrancy_factor *= 1.02  # Subtle vibrancy boost for blues
-        else:
-            vibrancy_factor *= 1.03  # Balanced vibrancy for other colors
-    
-    logger.info(f"Calculated adjustments: brightness={brightness_factor:.2f}, "
-                f"saturation={saturation_factor:.2f}, contrast={contrast_factor:.2f}, "
-                f"R={r_adjust:.2f}, G={g_adjust:.2f}, B={b_adjust:.2f}, "
-                f"dominant={dominant_channel if is_color_dominant else 'none'}")
-    
-    return {
-        'brightness': brightness_factor,
-        'saturation': saturation_factor,
-        'contrast': contrast_factor,
-        'color': color_factor,
-        'r_adjust': r_adjust,
-        'g_adjust': g_adjust,
-        'b_adjust': b_adjust,
-        'vibrancy': vibrancy_factor,
-        'is_color_dominant': is_color_dominant,  # Include this for reference
-        'dominant_channel': dominant_channel,    # Include this for reference
-        'has_significant_red': has_significant_red,  # Include this for reference
-        'applied_constraints': {
-            'min_adjustment': min_adjustment,
-            'max_adjustment': max_adjustment,
-            'difference_score': difference_score
-        }
-    }
-    
-def apply_adaptive_adjustments(artwork, adjustments):
-    """
-    Apply calculated color adjustments to the artwork.
-    
-    Args:
-        artwork: PIL Image of the artwork
-        adjustments: Dictionary of adjustment factors
-    
-    Returns:
-        PIL Image with adjustments applied
-    """
-    try:
-        # Convert to proper color space for adjustments
-        if artwork.mode != 'RGBA':
-            artwork = artwork.convert('RGBA')
-        
-        # Split into bands
-        r, g, b, a = artwork.split()
-        
-        # Create RGB image for adjustments
-        rgb_img = Image.merge('RGB', (r, g, b))
-        
-        # Apply brightness adjustment
-        enhancer = ImageEnhance.Brightness(rgb_img)
-        adjusted_rgb = enhancer.enhance(adjustments['brightness'])
-        
-        # Apply contrast adjustment
-        enhancer = ImageEnhance.Contrast(adjusted_rgb)
-        adjusted_rgb = enhancer.enhance(adjustments['contrast'])
-        
-        # Apply saturation adjustment
-        enhancer = ImageEnhance.Color(adjusted_rgb)
-        adjusted_rgb = enhancer.enhance(adjustments['saturation'])
-        
-        # Apply channel-specific adjustments for color temperature and tint
-        r, g, b = adjusted_rgb.split()
-        
-        # Adjust individual channels if needed
-        if abs(adjustments['r_adjust'] - 1.0) > 0.01:
-            r_enhancer = ImageEnhance.Brightness(r)
-            r = r_enhancer.enhance(adjustments['r_adjust'])
+            # Calculate bounding box using vectorized operations
+            points_array = np.array(points)
+            min_coords = np.floor(np.min(points_array, axis=0)).astype(int)
+            max_coords = np.ceil(np.max(points_array, axis=0)).astype(int)
             
-        if abs(adjustments['g_adjust'] - 1.0) > 0.01:
-            g_enhancer = ImageEnhance.Brightness(g)
-            g = g_enhancer.enhance(adjustments['g_adjust'])
+            min_x = max(0, min_coords[0] - padding)
+            min_y = max(0, min_coords[1] - padding)
+            max_x = max_coords[0] + padding
+            max_y = max_coords[1] + padding
             
-        if abs(adjustments['b_adjust'] - 1.0) > 0.01:
-            b_enhancer = ImageEnhance.Brightness(b)
-            b = b_enhancer.enhance(adjustments['b_adjust'])
-        
-        # Merge channels back together
-        adjusted_rgb = Image.merge('RGB', (r, g, b))
-        
-        # Recombine with alpha
-        result = Image.new('RGBA', artwork.size)
-        result.paste(adjusted_rgb, mask=a)
-        
-        return result
-    except Exception as e:
-        logger.error(f"Error applying adaptive adjustments: {str(e)}")
-        return artwork  # Return original artwork if adjustment fails
+            logger.info(f"Frame region with {padding}px padding: ({min_x}, {min_y}, {max_x}, {max_y})")
+            
+            return (min_x, min_y, max_x, max_y)
+            
+        except Exception as e:
+            logger.error(f"Error calculating frame region: {str(e)}")
+            raise
 
-# Main function to use in the warp_artwork pipeline
-def adaptive_color_match(artwork_image, background_image, transform_points, blend_mode='normal', opacity=1.0):
-    """
-    Adapt artwork colors to match the background where it will be placed.
-    Memory-optimized version.
-    """
-    try:
-        # Extract the target region from background
-        target_region = extract_surrounding_region(background_image, transform_points)
+    @staticmethod
+    def apply_perspective_transform(image, src_points, dst_points, output_size):
+        """Apply perspective transform to an image with proper alpha handling"""
+        # Convert PIL image to numpy array
+        img_array = np.array(image)
         
-        # Analyze color statistics
-        artwork_stats = analyze_image_colors(artwork_image)
-        target_stats = analyze_image_colors(target_region)
+        # Determine if the image has an alpha channel
+        has_alpha = len(img_array.shape) == 3 and img_array.shape[2] == 4
         
-        # Free memory for target_region as we no longer need it
-        del target_region
-        gc.collect()
-        
-        # Log color analysis results
-        logger.info(f"Artwork color stats: brightness={artwork_stats['brightness']:.1f}, "
-                    f"saturation={artwork_stats['saturation']:.2f}, "
-                    f"color_temp={artwork_stats['color_temp']:.2f}")
-        
-        logger.info(f"Target region stats: brightness={target_stats['brightness']:.1f}, "
-                    f"saturation={target_stats['saturation']:.2f}, "
-                    f"color_temp={target_stats['color_temp']:.2f}")
-        
-        # Setup config for blend mode
-        config = {'blend_mode': blend_mode} if blend_mode else {}
-        
-        # Calculate adjustments based on the analysis
-        adjustments = calculate_adjustments(artwork_stats, target_stats, config)
-        
-        # Apply adjustments to the artwork
-        adjusted_artwork = apply_adaptive_adjustments(artwork_image, adjustments)
-        
-        # Free original artwork memory
-        del artwork_image
-        gc.collect()
-        
-        # If blend_mode is multiply, also apply a specialized multiply effect
-        if blend_mode.lower() == 'multiply':
-            logger.info(f"Applying additional multiply blend effect with opacity {opacity}")
-            
-            # Memory optimization: Process in chunks for large images
-            # Check image size and use chunking if necessary
-            width, height = adjusted_artwork.size
-            total_pixels = width * height
-            
-            # If image is large, use chunked processing
-            if total_pixels > 3000000:  # Threshold for large images (3 megapixels)
-                logger.info(f"Large image detected ({width}x{height}), using chunked processing")
-                return apply_multiply_effect_chunked(adjusted_artwork, opacity, adjustments)
-            else:
-                # For smaller images, use the regular approach
-                return apply_multiply_effect(adjusted_artwork, opacity, adjustments)
-        
-        return adjusted_artwork
-        
-    except Exception as e:
-        logger.error(f"Error in adaptive color matching: {str(e)}")
-        logger.error(traceback.format_exc())
-        
-        # Fall back to original artwork
-        logger.info("Falling back to original artwork without color adjustments")
-        return artwork_image
-
-def apply_multiply_effect(artwork, opacity, adjustments):
-    """Apply multiply blend effect to an image."""
-    try:
-        # Convert to numpy array for pixel manipulation
-        artwork_array = np.array(artwork, dtype=np.float32)
-        
-        # Separate RGB and alpha channels
-        artwork_rgb = artwork_array[:, :, :3]
-        artwork_alpha = artwork_array[:, :, 3]
-        
-        # Check if it's color-dominant
-        is_color_dominant = adjustments.get('is_color_dominant', False)
-        dominant_channel = adjustments.get('dominant_channel', None)
-        has_significant_red = adjustments.get('has_significant_red', False)
-        
-        # Dynamic darkening factor based on color dominance
-        if is_color_dominant:
-            if dominant_channel == 'r':
-                # Use slightly more darkening for red-dominant images
-                base_darkening = 0.78  # Was 0.8 (higher = less darkening)
-            elif dominant_channel == 'b':
-                # Use standard darkening for blue-dominant (blues handle darkening better)
-                base_darkening = 0.74
-            else:
-                # Use moderate darkening for other colors
-                base_darkening = 0.75
-        elif has_significant_red:
-            # For red text on white
-            base_darkening = 0.72  # Slightly stronger darkening for red text
+        if has_alpha:
+            # Split the image into color and alpha channels
+            rgb = img_array[:, :, :3]
+            alpha = img_array[:, :, 3]
         else:
-            # Standard approach for non-dominant colors
-            base_darkening = 0.73
+            # If no alpha, just use the RGB channels and create a full opacity alpha
+            rgb = img_array
+            alpha = np.full((img_array.shape[0], img_array.shape[1]), 255, dtype=np.uint8)
         
-        logger.info(f"Using base darkening factor {base_darkening} for multiply blend")
+        # Convert points to numpy arrays
+        src_np = np.array(src_points, dtype=np.float32)
+        dst_np = np.array(dst_points, dtype=np.float32)
         
-        # Create pixel-wise darkening factors based on dominant channel
-        max_values = np.max(artwork_rgb, axis=2, keepdims=True)
-        channel_dominance = artwork_rgb / (max_values + 0.001)  # How close each channel is to the max (0-1)
+        # Calculate the perspective transform matrix
+        transform_matrix = cv2.getPerspectiveTransform(src_np, dst_np)
         
-        # Different boost amount for different color channels
-        r_boost = 0.17  # Stronger boost for red channel
-        g_boost = 0.12  # Moderate boost for green channel
-        b_boost = 0.10  # Lower boost for blue channel
+        # Warp the color channels
+        warped_rgb = cv2.warpPerspective(
+            rgb, 
+            transform_matrix, 
+            output_size, 
+            flags=cv2.INTER_LINEAR,
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=[0, 0, 0]
+        )
         
-        # For images with red text or elements on white
-        if has_significant_red and not is_color_dominant:
-            r_boost = 0.19  # Even stronger red preservation
+        # Warp the alpha channel separately
+        warped_alpha = cv2.warpPerspective(
+            alpha, 
+            transform_matrix, 
+            output_size, 
+            flags=cv2.INTER_LINEAR, 
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=0  # Transparent border
+        )
         
-        # Apply channel-specific boosts to create darkening factors
-        darkening_factors = np.zeros_like(artwork_rgb)
-        darkening_factors[:,:,0] = base_darkening + (r_boost * channel_dominance[:,:,0])  # Red channel
-        darkening_factors[:,:,1] = base_darkening + (g_boost * channel_dominance[:,:,1])  # Green channel
-        darkening_factors[:,:,2] = base_darkening + (b_boost * channel_dominance[:,:,2])  # Blue channel
+        # Combine RGB and alpha back together
+        warped_rgba = np.zeros((output_size[1], output_size[0], 4), dtype=np.uint8)
+        warped_rgba[:, :, :3] = warped_rgb
+        warped_rgba[:, :, 3] = warped_alpha
         
-        # Apply darkening with channel-specific factors
-        darkened_rgb = artwork_rgb * darkening_factors
-        
-        # Apply opacity to the darkening effect
-        if opacity < 1.0:
-            darkened_rgb = darkened_rgb * opacity + artwork_rgb * (1.0 - opacity)
-        
-        # Free memory for intermediate arrays
-        del artwork_rgb, max_values, channel_dominance, darkening_factors
-        gc.collect()
-        
-        # Create final array with darkened RGB and original alpha
-        final_array = np.zeros_like(artwork_array)
-        final_array[:, :, :3] = darkened_rgb
-        final_array[:, :, 3] = artwork_alpha  # Keep original alpha
-        
-        # Free memory for more intermediate arrays
-        del darkened_rgb, artwork_alpha
-        gc.collect()
-        
-        # Clip values and convert back to uint8
-        final_array = np.clip(final_array, 0, 255).astype(np.uint8)
-        
-        return Image.fromarray(final_array)
-    
-    except Exception as e:
-        logger.error(f"Error applying multiply effect: {str(e)}")
-        # Return original as fallback
-        return artwork
+        # Convert back to PIL image
+        return Image.fromarray(warped_rgba)
 
-def apply_multiply_effect_chunked(artwork, opacity, adjustments):
-    """Apply multiply blend effect to an image using chunked processing to save memory."""
-    try:
-        # Get image dimensions
-        width, height = artwork.size
-        
-        # Define chunk size (rows)
-        chunk_size = 500  # Process 500 rows at a time
-        
-        # Create a new empty image to hold the result
-        result = Image.new('RGBA', (width, height), (0, 0, 0, 0))
-        
-        # Check if it's color-dominant
-        is_color_dominant = adjustments.get('is_color_dominant', False)
-        dominant_channel = adjustments.get('dominant_channel', None)
-        has_significant_red = adjustments.get('has_significant_red', False)
-        
-        # Determine base darkening factor (same logic as before)
-        if is_color_dominant:
-            if dominant_channel == 'r':
-                base_darkening = 0.77
-            elif dominant_channel == 'b':
-                base_darkening = 0.7
-            else:
-                base_darkening = 0.75
-        elif has_significant_red:
-            base_darkening = 0.72
-        else:
-            base_darkening = 0.7
-        
-        # Different boost amount for different color channels
-        r_boost = 0.17
-        g_boost = 0.12
-        b_boost = 0.10
-        
-        # For images with red text or elements on white
-        if has_significant_red and not is_color_dominant:
-            r_boost = 0.19
-            
-        logger.info(f"Using chunked processing with chunk size {chunk_size} rows")
-        
-        # Process in chunks
-        for y_start in range(0, height, chunk_size):
-            # Calculate end of current chunk
-            y_end = min(y_start + chunk_size, height)
-            
-            # Crop current chunk
-            chunk = artwork.crop((0, y_start, width, y_end))
-            
-            # Convert to numpy array
-            chunk_array = np.array(chunk, dtype=np.float32)
-            
-            # Process chunk using same logic as before
-            chunk_rgb = chunk_array[:, :, :3]
-            chunk_alpha = chunk_array[:, :, 3]
-            
-            # Create pixel-wise darkening factors
-            max_values = np.max(chunk_rgb, axis=2, keepdims=True)
-            channel_dominance = chunk_rgb / (max_values + 0.001)
-            
-            # Apply channel-specific boosts
-            darkening_factors = np.zeros_like(chunk_rgb)
-            darkening_factors[:,:,0] = base_darkening + (r_boost * channel_dominance[:,:,0])
-            darkening_factors[:,:,1] = base_darkening + (g_boost * channel_dominance[:,:,1])
-            darkening_factors[:,:,2] = base_darkening + (b_boost * channel_dominance[:,:,2])
-            
-            # Apply darkening
-            darkened_rgb = chunk_rgb * darkening_factors
-            
-            # Apply opacity
-            if opacity < 1.0:
-                darkened_rgb = darkened_rgb * opacity + chunk_rgb * (1.0 - opacity)
-            
-            # Create final array for this chunk
-            final_chunk_array = np.zeros_like(chunk_array)
-            final_chunk_array[:, :, :3] = darkened_rgb
-            final_chunk_array[:, :, 3] = chunk_alpha
-            
-            # Clip values and convert back to uint8
-            final_chunk_array = np.clip(final_chunk_array, 0, 255).astype(np.uint8)
-            
-            # Convert back to PIL image
-            processed_chunk = Image.fromarray(final_chunk_array)
-            
-            # Paste this chunk into the result image
-            result.paste(processed_chunk, (0, y_start))
-            
-            # Clean up memory for this chunk
-            del chunk, chunk_array, chunk_rgb, chunk_alpha, max_values
-            del channel_dominance, darkening_factors, darkened_rgb, final_chunk_array, processed_chunk
-            gc.collect()
-            
-            # Log progress for large images
-            logger.info(f"Processed chunk {y_start}-{y_end} of {height} rows ({int((y_end/height)*100)}% complete)")
-        
-        return result
-        
-    except Exception as e:
-        logger.error(f"Error in chunked multiply effect: {str(e)}")
-        # Return original as fallback
-        return artwork
+    @staticmethod
+    def smooth_edges(image, kernel_size=3):
+        """Apply light Gaussian blur to smooth jagged edges"""
+        image_array = np.array(image)
+        smoothed = cv2.GaussianBlur(image_array, (kernel_size, kernel_size), 0.5)
+        return Image.fromarray(smoothed)
 
-def warp_artwork(artwork_data, transform_points, output_size, template_name, 
-                 smart_object_name, aspect_ratio, record_id, background_data=None, 
-                 blend_mode='normal', opacity=255):
-    """Warp artwork to fit transform points and apply adaptive color matching - memory optimized"""
-    try:
-        # Load the artwork
-        artwork = Image.open(artwork_data).convert("RGBA")
-        logger.info(f"Artwork dimensions: {artwork.size}")
-        
-        # Load background if provided, for color matching
-        background = None
-        if background_data:
-            try:
-                background = Image.open(background_data).convert("RGBA")
-                logger.info(f"Background dimensions: {background.size}")
-            except Exception as bg_error:
-                logger.error(f"Error loading background for color matching: {str(bg_error)}")
-                
-        # Calculate dimensions from transform points
-        # Ensure transform_points are properly formatted
+    @staticmethod
+    def calculate_target_dimensions(transform_points):
+        """Calculate target dimensions from transform points"""
         if isinstance(transform_points, list) and transform_points and isinstance(transform_points[0], list):
             transform_points = [(point[0], point[1]) for point in transform_points]
+        
+        # Use NumPy for coordinate calculations
+        coords_array = np.array(transform_points)
+        min_coords = np.min(coords_array, axis=0)
+        max_coords = np.max(coords_array, axis=0)
+        
+        target_width = int(max_coords[0] - min_coords[0])
+        target_height = int(max_coords[1] - min_coords[1])
+        
+        return target_width, target_height
+
+# ==========================================
+# PHOTOSHOP-STYLE BLEND MODES
+# ==========================================
+
+class PhotoshopBlendModes:
+    """Vectorized implementations of Photoshop blend modes."""
+    
+    @staticmethod
+    def multiply_blend(top_rgba, bottom_rgba):
+        """
+        Apply Photoshop multiply blend mode using fully vectorized NumPy operations.
+        
+        Args:
+            top_rgba: Top layer as numpy array (H, W, 4) with values 0-255
+            bottom_rgba: Bottom layer as numpy array (H, W, 4) with values 0-255
             
-        x_coords = [p[0] for p in transform_points]
-        y_coords = [p[1] for p in transform_points]
-        min_x, max_x = min(x_coords), max(x_coords)
-        min_y, max_y = min(y_coords), max(y_coords)
+        Returns:
+            numpy array (H, W, 4) with blend applied
+        """
+        # Convert to float32 for calculations (more memory efficient than float64)
+        top = top_rgba.astype(np.float32)
+        bottom = bottom_rgba.astype(np.float32)
         
-        target_width = int(max_x - min_x)
-        target_height = int(max_y - min_y)
+        # Normalize to 0-1 range
+        top_norm = top / 255.0
+        bottom_norm = bottom / 255.0
         
-        logger.info(f"Target dimensions: {target_width}x{target_height}")
+        # Split RGB and alpha channels
+        top_rgb = top_norm[:, :, :3]
+        top_alpha = top_norm[:, :, 3]
+        bottom_rgb = bottom_norm[:, :, :3]
+        bottom_alpha = bottom_norm[:, :, 3]
         
-        # Resize artwork to fit the dimensions while preserving aspect ratio
-        artwork_resized = ImageOps.contain(artwork, (target_width, target_height))
-        logger.info(f"Resized artwork to: {artwork_resized.size}")
+        # Photoshop multiply formula: (top * bottom) for RGB - fully vectorized
+        multiply_rgb = top_rgb * bottom_rgb
         
-        # Free original artwork memory
-        del artwork
-        gc.collect()
+        # Standard alpha compositing: out_alpha = top_alpha + bottom_alpha * (1 - top_alpha)
+        result_alpha = top_alpha + bottom_alpha * (1.0 - top_alpha)
         
-        # Apply adaptive color matching if we have a background
-        if background:
-            # Convert opacity from 0-255 to 0-1 for adaptive_color_match
-            opacity_normalized = opacity / 255.0
+        # Alpha composite the RGB channels - vectorized
+        # Expand alpha dimensions for broadcasting
+        top_alpha_expanded = top_alpha[:, :, np.newaxis]
+        bottom_alpha_expanded = bottom_alpha[:, :, np.newaxis]
+        result_alpha_expanded = result_alpha[:, :, np.newaxis]
+        
+        # Avoid division by zero
+        safe_result_alpha = np.where(result_alpha_expanded > 0.0, result_alpha_expanded, 1.0)
+        
+        # Composite RGB: (multiply_rgb * top_alpha + bottom_rgb * bottom_alpha * (1 - top_alpha)) / result_alpha
+        numerator = (multiply_rgb * top_alpha_expanded + 
+                    bottom_rgb * bottom_alpha_expanded * (1.0 - top_alpha_expanded))
+        
+        result_rgb = np.where(
+            result_alpha_expanded > 0.0,
+            numerator / safe_result_alpha,
+            0.0
+        )
+        
+        # Combine RGB and alpha back together
+        result = np.zeros_like(top_norm)
+        result[:, :, :3] = result_rgb
+        result[:, :, 3] = result_alpha
+        
+        # Convert back to 0-255 range and uint8 - vectorized
+        result_uint8 = np.clip(result * 255.0, 0, 255).astype(np.uint8)
+        
+        return result_uint8
+
+    @staticmethod
+    def luminosity_blend(base_rgba, blend_rgba, opacity=1.0):
+        """
+        Apply Photoshop luminosity blend mode using fully vectorized NumPy operations.
+        
+        Args:
+            base_rgba: Base layer as numpy array (H, W, 4) with values 0-255
+            blend_rgba: Blend layer as numpy array (H, W, 4) with values 0-255
+            opacity: Blend opacity (0.0-1.0)
             
-            logger.info(f"Applying adaptive color matching with blend mode: {blend_mode}, opacity: {opacity_normalized}")
+        Returns:
+            numpy array (H, W, 4) with blend applied
+        """
+        # Convert to float32 for calculations
+        base = base_rgba.astype(np.float32) / 255.0
+        blend = blend_rgba.astype(np.float32) / 255.0
+        
+        # Apply opacity to blend layer
+        blend[:, :, 3] *= opacity
+        
+        # Split channels
+        base_rgb = base[:, :, :3]
+        base_alpha = base[:, :, 3]
+        blend_rgb = blend[:, :, :3]
+        blend_alpha = blend[:, :, 3]
+        
+        # Calculate luminosity using ITU-R BT.601 weights - vectorized
+        # Weights as numpy array for efficient computation
+        lum_weights = np.array([0.299, 0.587, 0.114], dtype=np.float32)
+        
+        # Calculate luminosity for both layers - vectorized dot product
+        base_lum = np.dot(base_rgb, lum_weights)
+        blend_lum = np.dot(blend_rgb, lum_weights)
+        
+        # Luminosity difference
+        lum_diff = blend_lum[:, :, np.newaxis] - base_lum[:, :, np.newaxis]
+        
+        # Apply luminosity blend: adjust base RGB by luminosity difference
+        result_rgb = base_rgb + lum_diff
+        
+        # Clamp RGB values to valid range
+        result_rgb = np.clip(result_rgb, 0.0, 1.0)
+        
+        # Alpha compositing - vectorized
+        blend_alpha_expanded = blend_alpha[:, :, np.newaxis]
+        base_alpha_expanded = base_alpha[:, :, np.newaxis]
+        
+        result_alpha = blend_alpha + base_alpha * (1.0 - blend_alpha)
+        result_alpha_expanded = result_alpha[:, :, np.newaxis]
+        
+        # Avoid division by zero
+        safe_result_alpha = np.where(result_alpha_expanded > 0.0, result_alpha_expanded, 1.0)
+        
+        # Composite RGB
+        numerator = (result_rgb * blend_alpha_expanded + 
+                    base_rgb * base_alpha_expanded * (1.0 - blend_alpha_expanded))
+        
+        final_rgb = np.where(
+            result_alpha_expanded > 0.0,
+            numerator / safe_result_alpha,
+            0.0
+        )
+        
+        # Combine results
+        result = np.zeros_like(base)
+        result[:, :, :3] = final_rgb
+        result[:, :, 3] = result_alpha
+        
+        # Convert back to uint8 - vectorized
+        result_uint8 = np.clip(result * 255.0, 0, 255).astype(np.uint8)
+        
+        return result_uint8
+
+    @staticmethod
+    def normal_blend(top_rgba, bottom_rgba, opacity=1.0):
+        """
+        Apply normal blend mode using vectorized operations.
+        
+        Args:
+            top_rgba: Top layer as numpy array (H, W, 4)
+            bottom_rgba: Bottom layer as numpy array (H, W, 4)
+            opacity: Blend opacity (0.0-1.0)
             
-            # Apply the color matching
-            artwork_processed = adaptive_color_match(
-                artwork_resized, 
-                background, 
-                transform_points,
-                blend_mode,
-                opacity_normalized
-            )
+        Returns:
+            numpy array with normal blend applied
+        """
+        # Convert to float32 for calculations
+        top = top_rgba.astype(np.float32) / 255.0
+        bottom = bottom_rgba.astype(np.float32) / 255.0
+        
+        # Apply opacity to top layer
+        top[:, :, 3] *= opacity
+        
+        # Standard alpha compositing - fully vectorized
+        top_alpha = top[:, :, 3:4]  # Keep as 4D for broadcasting
+        
+        # Alpha blend: result = top * alpha + bottom * (1 - alpha)
+        result = top * top_alpha + bottom * (1.0 - top_alpha)
+        
+        # Alpha compositing for alpha channel
+        result[:, :, 3] = top[:, :, 3] + bottom[:, :, 3] * (1.0 - top[:, :, 3])
+        
+        # Convert back to uint8
+        return np.clip(result * 255.0, 0, 255).astype(np.uint8)
+
+# ==========================================
+# TILED BLENDING PROCESSOR
+# ==========================================
+
+class TiledBlendProcessor:
+    """Handles memory-efficient tiled blending operations."""
+    
+    def __init__(self, blend_modes_handler=None):
+        self.blend_modes = blend_modes_handler or PhotoshopBlendModes()
+    
+    def apply_blend_mode_to_tile(self, top_tile, bottom_tile, blend_mode='multiply', opacity=1.0, artwork_mask=None):
+        """
+        Apply specified blend mode to image tiles using vectorized operations with masking.
+
+        Args:
+            top_tile: Top layer tile as PIL Image (RGBA)
+            bottom_tile: Bottom layer tile as PIL Image (RGBA)
+            blend_mode: Blend mode ('multiply', 'luminosity', etc.)
+            opacity: Blend opacity (0.0-1.0)
+            artwork_mask: Optional PIL Image mask (L mode) to limit blend area
             
-            # Free memory for the resized artwork as we now have the processed version
-            del artwork_resized
+        Returns:
+            PIL Image with blend applied only in masked areas
+        """
+        # Convert PIL images to numpy arrays - single operation, no copying
+        top_array = np.asarray(top_tile, dtype=np.uint8)
+        bottom_array = np.asarray(bottom_tile, dtype=np.uint8)
+        
+        # Ensure both are RGBA (should be guaranteed by caller)
+        if top_array.shape[2] != 4 or bottom_array.shape[2] != 4:
+            raise ValueError("Both tiles must be RGBA format")
+        
+        # Apply the specified blend mode using vectorized functions
+        if blend_mode.lower() == 'multiply':
+            blended_array = self.blend_modes.multiply_blend(top_array, bottom_array)
+        elif blend_mode.lower() == 'luminosity':
+            blended_array = self.blend_modes.luminosity_blend(bottom_array, top_array, opacity)
+        else:
+            # Normal blend mode - vectorized
+            logger.warning(f"Unknown blend mode '{blend_mode}', using normal blend")
+            blended_array = self.blend_modes.normal_blend(top_array, bottom_array, opacity)
+        
+        # Apply artwork mask if provided
+        if artwork_mask is not None:
+            mask_array = np.asarray(artwork_mask, dtype=np.uint8)
+            
+            # Ensure mask is single channel
+            if len(mask_array.shape) == 3:
+                mask_array = mask_array[:, :, 0]  # Take first channel if RGB
+            
+            # Normalize mask to 0-1 range
+            mask_normalized = mask_array.astype(np.float32) / 255.0
+            mask_expanded = mask_normalized[:, :, np.newaxis]  # Add channel dimension for broadcasting
+            
+            # Convert arrays to float for blending
+            top_float = top_array.astype(np.float32)
+            blended_float = blended_array.astype(np.float32)
+            
+            # Apply mask: blended where mask=1, transparent where mask=0
+            # RGB channels: use blended where mask is white, transparent where mask is black
+            result_rgb = blended_float[:, :, :3] * mask_expanded
+            
+            # Alpha channel: use artwork's alpha where mask is white, 0 where mask is black
+            result_alpha = top_float[:, :, 3] * mask_normalized
+            
+            # Combine RGB and alpha
+            result_array = np.zeros_like(blended_float)
+            result_array[:, :, :3] = result_rgb
+            result_array[:, :, 3] = result_alpha
+            
+            # Convert back to uint8
+            result_array = np.clip(result_array, 0, 255).astype(np.uint8)
+        else:
+            # No mask, use full blended result
+            result_array = blended_array
+        
+        # Convert back to PIL Image - single operation
+        return Image.fromarray(result_array, mode='RGBA')
+    
+    def blend_images_tiled(self, top_image_url, bottom_image_url, frame_region, 
+                        blend_mode='multiply', tile_size=(128, 128), 
+                        opacity=1.0, padding=4):
+        """
+        Memory-efficient tiled blending with automatic masking to prevent white areas.
+        """
+        # Variables for cleanup
+        top_data = None
+        bottom_data = None
+        top_image = None
+        bottom_image = None
+        result_image = None
+        artwork_mask = None
+        
+        try:
+            # Download and load images efficiently
+            logger.info(f"Downloading images for tiled blending")
+            
+            # Download both images
+            top_data = s3_handler.download_file(top_image_url)
+            bottom_data = s3_handler.download_file(bottom_image_url)
+            
+            # Load images as RGBA
+            top_image = Image.open(top_data).convert('RGBA')
+            bottom_image = Image.open(bottom_data).convert('RGBA')
+            
+            # Free download data immediately
+            del top_data, bottom_data
+            top_data = bottom_data = None
             gc.collect()
             
-            logger.info("Adaptive color matching applied")
-        else:
-            # Without background, just use the resized artwork
-            artwork_processed = artwork_resized
+            # Ensure images are the same size
+            if top_image.size != bottom_image.size:
+                logger.info(f"Resizing top image from {top_image.size} to {bottom_image.size}")
+                top_image = top_image.resize(bottom_image.size, Image.LANCZOS)
             
-            # If multiply blend mode, apply simple darkening
-            if blend_mode.lower() == 'multiply':
-                logger.info(f"No background available, applying simple multiply darkening with opacity {opacity/255.0}")
-                dummy_background = Image.new('RGBA', artwork_processed.size, (128, 128, 128, 255))
-                artwork_processed = adaptive_color_match(
-                    artwork_processed,
-                    dummy_background,
-                    [(0, 0), (artwork_processed.width, 0), (artwork_processed.width, artwork_processed.height), (0, artwork_processed.height)],
-                    'multiply',
-                    opacity/255.0
+            # Extract and validate frame region
+            min_x, min_y, max_x, max_y = frame_region
+            img_width, img_height = bottom_image.size
+            
+            # Clamp region to image bounds
+            min_x = max(0, min_x)
+            min_y = max(0, min_y)
+            max_x = min(img_width, max_x)
+            max_y = min(img_height, max_y)
+            
+            region_width = max_x - min_x
+            region_height = max_y - min_y
+            
+            if region_width <= 0 or region_height <= 0:
+                logger.warning("Invalid frame region, returning transparent image")
+                return Image.new('RGBA', bottom_image.size, (0, 0, 0, 0))
+            
+            logger.info(f"Processing region: ({min_x}, {min_y}, {max_x}, {max_y}) - {region_width}x{region_height}")
+            logger.info(f"Using {blend_mode} blend mode with opacity {opacity:.2f}")
+            
+            # CREATE ARTWORK MASK: Only blend in the frame region
+            artwork_mask = Image.new('L', bottom_image.size, 0)  # Start with black (transparent)
+            mask_draw = ImageDraw.Draw(artwork_mask)
+            
+            # Fill the frame region with white (where blend should happen)
+            mask_draw.rectangle([(min_x, min_y), (max_x, max_y)], fill=255)
+            
+            # Optional: Make mask more precise by using artwork's alpha channel
+            # Extract alpha from artwork and use it to refine the mask
+            artwork_alpha = top_image.split()[-1]  # Get alpha channel
+            
+            # Combine rectangular mask with artwork alpha for precise masking
+            combined_mask = Image.new('L', bottom_image.size, 0)
+            combined_mask.paste(artwork_alpha, (0, 0), artwork_alpha)  # Paste artwork alpha
+            
+            # Intersect with rectangular region mask
+            combined_mask = ImageChops.multiply(combined_mask, artwork_mask)
+            artwork_mask = combined_mask
+            
+            logger.info(f"Created artwork mask for precise blending")
+            
+            # Create result image starting with transparent
+            result_image = Image.new('RGBA', bottom_image.size, (0, 0, 0, 0))
+            
+            # Process tiles within the frame region with masking
+            tile_width, tile_height = tile_size
+            tiles_processed = 0
+            total_tiles = ((max_x - min_x + tile_width - 1) // tile_width) * \
+                        ((max_y - min_y + tile_height - 1) // tile_height)
+            
+            logger.info(f"Processing {total_tiles} tiles of size {tile_size} with artwork masking")
+            
+            # Process tiles using vectorized operations with masking
+            for y in range(min_y, max_y, tile_height):
+                for x in range(min_x, max_x, tile_width):
+                    # Calculate actual tile boundaries
+                    tile_min_x = x
+                    tile_min_y = y
+                    tile_max_x = min(x + tile_width, max_x)
+                    tile_max_y = min(y + tile_height, max_y)
+                    
+                    # Extract tiles - single crop operation each
+                    top_tile = top_image.crop((tile_min_x, tile_min_y, tile_max_x, tile_max_y))
+                    bottom_tile = bottom_image.crop((tile_min_x, tile_min_y, tile_max_x, tile_max_y))
+                    mask_tile = artwork_mask.crop((tile_min_x, tile_min_y, tile_max_x, tile_max_y))
+                    
+                    # Apply vectorized blend mode with masking
+                    blended_tile = self.apply_blend_mode_to_tile(
+                        top_tile, bottom_tile, blend_mode, opacity, mask_tile
+                    )
+                    
+                    # Paste result back - single paste operation
+                    result_image.paste(blended_tile, (tile_min_x, tile_min_y), blended_tile)
+                    
+                    tiles_processed += 1
+                    
+                    # Clean up tile memory immediately
+                    del top_tile, bottom_tile, mask_tile, blended_tile
+                    
+                    # Periodic garbage collection for memory management
+                    if tiles_processed % 20 == 0:  # Less frequent GC
+                        gc.collect()
+                        if tiles_processed % 100 == 0:  # Progress logging
+                            progress = (tiles_processed / total_tiles) * 100
+                            logger.info(f"Processed {tiles_processed}/{total_tiles} tiles ({progress:.1f}%)")
+            
+            logger.info(f"Completed processing {tiles_processed} tiles using masked {blend_mode} blend mode")
+            
+            return result_image
+            
+        except Exception as e:
+            logger.error(f"Error in vectorized tiled blending with masking: {str(e)}")
+            logger.error(traceback.format_exc())
+            raise
+            
+        finally:
+            # Comprehensive cleanup
+            cleanup_objects = [top_data, bottom_data, top_image, bottom_image, artwork_mask]
+            for obj in cleanup_objects:
+                try:
+                    if obj is not None:
+                        del obj
+                except:
+                    pass
+            gc.collect()
+# ==========================================
+# PHOTOSHOP-STYLE COLOR ADJUSTMENTS
+# ==========================================
+
+class PhotoshopColorAdjustments:
+    """Handles Photoshop-style color adjustments with -100 to +100 scale."""
+    
+    def create_adjustments_json(smart_object_names, default_adjustments=None):
+        """
+        Create JSON structure for Photoshop-style color adjustments (-100 to +100 scale).
+        
+        Args:
+            smart_object_names: List of smart object names to include
+            default_adjustments: Optional default values to use
+        
+        Returns:
+            JSON string with adjustment parameters
+        """
+        # Default adjustment values (0 = no change)
+        if default_adjustments is None:
+            default_adjustments = {
+                "brightness": 0,      # -100 to +100 (-100 = black, +100 = white)
+                "contrast": 0,        # -100 to +100 (-100 = flat gray, +100 = maximum contrast)
+                "saturation": 0,      # -100 to +100 (-100 = grayscale, +100 = hyper-saturated)
+                "vibrance": 0,        # -100 to +100 (smart saturation adjustment)
+                "highlights": 0,      # -100 to +100 (adjust bright areas)
+                "shadows": 0,         # -100 to +100 (adjust dark areas)
+                "whites": 0,          # -100 to +100 (adjust white point)
+                "blacks": 0,          # -100 to +100 (adjust black point)
+                "exposure": 0,        # -100 to +100 (overall exposure adjustment)
+                "gamma": 0,           # -100 to +100 (midtone adjustment)
+                "hue_shift": 0,       # -100 to +100 (hue rotation)
+                "warmth": 0,          # -100 to +100 (color temperature)
+                "tint": 0,            # -100 to +100 (green-magenta shift)
+                "clarity": 0,         # -100 to +100 (midtone contrast)
+                "structure": 0        # -100 to +100 (fine detail enhancement)
+            }
+        
+        adjustments_data = {
+            "_metadata": {
+                "description": "Photoshop-style color adjustment parameters (applied after blend modes)",
+                "version": "2.0",
+                "scale": "All values range from -100 to +100, where 0 = no adjustment",
+                "adjustments": {
+                    "brightness": "Overall brightness (-100=black, 0=original, +100=white)",
+                    "contrast": "Overall contrast (-100=flat, 0=original, +100=maximum)",
+                    "saturation": "Color intensity (-100=grayscale, 0=original, +100=hyper-saturated)",
+                    "vibrance": "Smart saturation (protects skin tones, -100 to +100)",
+                    "highlights": "Bright area adjustment (-100=darker highlights, +100=brighter)",
+                    "shadows": "Dark area adjustment (-100=darker shadows, +100=brighter)",
+                    "whites": "White point adjustment (-100=gray whites, +100=pure white)",
+                    "blacks": "Black point adjustment (-100=pure black, +100=gray blacks)",
+                    "exposure": "Exposure compensation (-100=underexposed, +100=overexposed)",
+                    "gamma": "Midtone adjustment (-100=darker mids, +100=brighter mids)",
+                    "hue_shift": "Hue rotation (-100 to +100, affects all colors)",
+                    "warmth": "Color temperature (-100=cooler/blue, +100=warmer/orange)",
+                    "tint": "Green-magenta shift (-100=green, +100=magenta)",
+                    "clarity": "Midtone contrast (-100=soft, +100=crisp)",
+                    "structure": "Fine detail enhancement (-100=smooth, +100=detailed)"
+                },
+                "application_order": [
+                    "exposure", "highlights", "shadows", "whites", "blacks",
+                    "brightness", "contrast", "gamma", "clarity", "structure",
+                    "saturation", "vibrance", "hue_shift", "warmth", "tint"
+                ]
+            },
+            "_global_settings": {
+                "luminosity_blend_strength": 20,  # NEW: Global luminosity blend (0-100)
+                "_description": "Global settings that apply to all artworks during processing"
+            }
+        }
+        
+        # Add default adjustments for each smart object
+        for obj_name in smart_object_names:
+            adjustments_data[obj_name] = default_adjustments.copy()
+        
+        return json.dumps(adjustments_data, indent=2)
+
+    @staticmethod
+    def parse_adjustments(adjustments_json, smart_object_name):
+        """
+        Parse Photoshop-style adjustments from JSON for a specific smart object.
+        Also extracts global settings.
+        
+        Args:
+            adjustments_json: JSON string with manual adjustments
+            smart_object_name: Name of the smart object to get adjustments for
+        
+        Returns:
+            Dictionary with adjustment values or None if not found
+        """
+        try:
+            if not adjustments_json or adjustments_json.strip() == "":
+                return None
+                
+            data = json.loads(adjustments_json)
+            
+            # Skip metadata and get the smart object adjustments
+            if smart_object_name in data and smart_object_name not in ["_metadata", "_global_settings"]:
+                adjustments = data[smart_object_name]
+                logger.info(f"Using Photoshop-style adjustments for {smart_object_name}: {adjustments}")
+                return adjustments
+            else:
+                logger.warning(f"No adjustments found for {smart_object_name}")
+                return None
+                
+        except json.JSONDecodeError as e:
+            logger.error(f"Error parsing adjustments JSON: {e}")
+            return None
+        except Exception as e:
+            logger.error(f"Error reading adjustments: {e}")
+            return None
+        
+    @staticmethod
+    def parse_global_settings(adjustments_json):
+        """
+        Parse global settings from adjustments JSON.
+        
+        Args:
+            adjustments_json: JSON string with adjustments
+            
+        Returns:
+            Dictionary with global settings
+        """
+        try:
+            if not adjustments_json or adjustments_json.strip() == "":
+                return {"luminosity_blend_strength": 20}  # Default
+                
+            data = json.loads(adjustments_json)
+            
+            # Get global settings
+            if "_global_settings" in data:
+                global_settings = data["_global_settings"]
+                logger.info(f"Using global settings: {global_settings}")
+                return global_settings
+            else:
+                logger.info("No global settings found, using defaults")
+                return {"luminosity_blend_strength": 20}  # Default
+                
+        except json.JSONDecodeError as e:
+            logger.error(f"Error parsing global settings JSON: {e}")
+            return {"luminosity_blend_strength": 20}  # Default
+        except Exception as e:
+            logger.error(f"Error reading global settings: {e}")
+            return {"luminosity_blend_strength": 20}  # Default
+
+
+    @staticmethod
+    def convert_scale_to_factor(value, adjustment_type):
+        """
+        Convert Photoshop-style -100 to +100 scale to multiplication factors.
+        
+        Args:
+            value: Adjustment value (-100 to +100)
+            adjustment_type: Type of adjustment for specific scaling
+        
+        Returns:
+            Multiplication factor for the adjustment
+        """
+        # Clamp value to valid range
+        value = max(-100, min(100, value))
+        
+        if adjustment_type in ['brightness', 'exposure']:
+            # Linear scaling: -100 = 0.0, 0 = 1.0, +100 = 2.0
+            return 1.0 + (value / 100.0)
+        
+        elif adjustment_type in ['contrast', 'clarity', 'structure']:
+            # Exponential scaling for contrast: -100 = 0.1, 0 = 1.0, +100 = 3.0
+            if value == 0:
+                return 1.0
+            elif value > 0:
+                return 1.0 + (value / 100.0) * 2.0  # 1.0 to 3.0
+            else:
+                return 1.0 + (value / 100.0) * 0.9  # 0.1 to 1.0
+        
+        elif adjustment_type in ['saturation', 'vibrance']:
+            # Saturation scaling: -100 = 0.0, 0 = 1.0, +100 = 2.5
+            if value == 0:
+                return 1.0
+            elif value > 0:
+                return 1.0 + (value / 100.0) * 1.5  # 1.0 to 2.5
+            else:
+                return 1.0 + (value / 100.0)  # 0.0 to 1.0
+        
+        elif adjustment_type == 'gamma':
+            # Gamma scaling: -100 = 0.3, 0 = 1.0, +100 = 3.0
+            if value == 0:
+                return 1.0
+            elif value > 0:
+                return 1.0 + (value / 100.0) * 2.0  # 1.0 to 3.0
+            else:
+                return 1.0 + (value / 100.0) * 0.7  # 0.3 to 1.0
+        
+        elif adjustment_type in ['hue_shift']:
+            # Hue shift in degrees: -100 = -180°, 0 = 0°, +100 = +180°
+            return value * 1.8  # Convert to degrees
+        
+        elif adjustment_type in ['warmth', 'tint']:
+            # Color temperature/tint scaling: -100 to +100 as percentage
+            return value / 100.0
+        
+        elif adjustment_type in ['highlights', 'shadows', 'whites', 'blacks']:
+            # Tone adjustments: -100 to +100 as factors
+            return 1.0 + (value / 100.0) * 0.5  # 0.5 to 1.5 range
+        
+        else:
+            # Default linear scaling
+            return 1.0 + (value / 100.0)
+
+    def apply_adjustments_vectorized(self, image, adjustments):
+        """
+        Apply Photoshop-style color adjustments using vectorized operations.
+        
+        Args:
+            image: PIL Image to adjust
+            adjustments: Dictionary with adjustment values (-100 to +100)
+        
+        Returns:
+            PIL Image with adjustments applied
+        """
+        try:
+            if not adjustments:
+                return image
+            
+            # Convert image to numpy array for vectorized processing
+            img_array = np.array(image).astype(np.float32)
+            
+            # Separate RGB and alpha channels
+            if img_array.shape[2] == 4:  # RGBA
+                rgb_array = img_array[:, :, :3]
+                alpha_array = img_array[:, :, 3]
+                has_alpha = True
+            else:  # RGB
+                rgb_array = img_array
+                alpha_array = None
+                has_alpha = False
+            
+            # Normalize RGB to 0-1 range
+            rgb_normalized = rgb_array / 255.0
+            
+            # Apply adjustments in Photoshop order
+            adjustment_order = [
+                'exposure', 'highlights', 'shadows', 'whites', 'blacks',
+                'brightness', 'contrast', 'gamma', 'brightness', 'contrast', 'gamma', 'clarity', 'structure',
+                'saturation', 'vibrance', 'hue_shift', 'warmth', 'tint'
+            ]
+            
+            for adj_type in adjustment_order:
+                if adj_type in adjustments and adjustments[adj_type] != 0:
+                    value = adjustments[adj_type]
+                    logger.debug(f"Applying {adj_type}: {value}")
+                    
+                    if adj_type == 'exposure':
+                        # Exposure adjustment (affects all channels equally)
+                        factor = self.convert_scale_to_factor(value, adj_type)
+                        rgb_normalized = np.clip(rgb_normalized * factor, 0.0, 1.0)
+                    
+                    elif adj_type == 'brightness':
+                        # Brightness adjustment (linear)
+                        offset = value / 100.0  # -1.0 to +1.0
+                        rgb_normalized = np.clip(rgb_normalized + offset, 0.0, 1.0)
+                    
+                    elif adj_type == 'contrast':
+                        # Contrast adjustment around midpoint
+                        factor = self.convert_scale_to_factor(value, adj_type)
+                        rgb_normalized = np.clip(((rgb_normalized - 0.5) * factor) + 0.5, 0.0, 1.0)
+                    
+                    elif adj_type == 'gamma':
+                        # Gamma correction
+                        gamma = self.convert_scale_to_factor(value, adj_type)
+                        rgb_normalized = np.power(rgb_normalized, 1.0 / gamma)
+                    
+                    elif adj_type == 'highlights':
+                        # Adjust highlights (bright areas)
+                        factor = self.convert_scale_to_factor(value, adj_type)
+                        # Create highlight mask (areas > 0.7)
+                        highlight_mask = rgb_normalized > 0.7
+                        rgb_normalized = np.where(highlight_mask, 
+                                                np.clip(rgb_normalized * factor, 0.0, 1.0),
+                                                rgb_normalized)
+                    
+                    elif adj_type == 'shadows':
+                        # Adjust shadows (dark areas)
+                        factor = self.convert_scale_to_factor(value, adj_type)
+                        # Create shadow mask (areas < 0.3)
+                        shadow_mask = rgb_normalized < 0.3
+                        rgb_normalized = np.where(shadow_mask,
+                                                np.clip(rgb_normalized * factor, 0.0, 1.0),
+                                                rgb_normalized)
+                    
+                    elif adj_type == 'whites':
+                        # Adjust white point
+                        factor = self.convert_scale_to_factor(value, adj_type)
+                        # Affect very bright areas (> 0.9)
+                        white_mask = rgb_normalized > 0.9
+                        rgb_normalized = np.where(white_mask,
+                                                np.clip(rgb_normalized * factor, 0.0, 1.0),
+                                                rgb_normalized)
+                    
+                    elif adj_type == 'blacks':
+                        # Adjust black point
+                        factor = self.convert_scale_to_factor(value, adj_type)
+                        # Affect very dark areas (< 0.1)
+                        black_mask = rgb_normalized < 0.1
+                        rgb_normalized = np.where(black_mask,
+                                                np.clip(rgb_normalized * factor, 0.0, 1.0),
+                                                rgb_normalized)
+                    
+                    elif adj_type in ['saturation', 'vibrance']:
+                        # Saturation/vibrance adjustment
+                        factor = self.convert_scale_to_factor(value, adj_type)
+                        
+                        # Convert to grayscale for desaturation
+                        gray_weights = np.array([0.299, 0.587, 0.114])
+                        gray = np.dot(rgb_normalized, gray_weights)
+                        gray_expanded = gray[:, :, np.newaxis]
+                        
+                        # Blend between grayscale and original based on factor
+                        if factor < 1.0:
+                            # Desaturation
+                            rgb_normalized = gray_expanded + (rgb_normalized - gray_expanded) * factor
+                        else:
+                            # Saturation boost
+                            rgb_normalized = rgb_normalized + (rgb_normalized - gray_expanded) * (factor - 1.0)
+                        
+                        rgb_normalized = np.clip(rgb_normalized, 0.0, 1.0)
+                    
+                    elif adj_type == 'hue_shift':
+                        # Hue shift (simplified RGB rotation)
+                        degrees = self.convert_scale_to_factor(value, adj_type)
+                        # This is a simplified hue shift - for full HSV conversion, use colorsys
+                        # For now, apply a simple color channel rotation
+                        if abs(degrees) > 1:  # Only apply if significant
+                            # Simplified hue rotation matrix (approximate)
+                            cos_h = np.cos(np.radians(degrees))
+                            sin_h = np.sin(np.radians(degrees))
+                            
+                            # Apply rotation to RGB channels
+                            r, g, b = rgb_normalized[:, :, 0], rgb_normalized[:, :, 1], rgb_normalized[:, :, 2]
+                            new_r = r * cos_h - g * sin_h
+                            new_g = r * sin_h + g * cos_h
+                            new_b = b  # Blue channel less affected in this simplified version
+                            
+                            rgb_normalized = np.stack([new_r, new_g, new_b], axis=-1)
+                            rgb_normalized = np.clip(rgb_normalized, 0.0, 1.0)
+                    
+                    elif adj_type == 'warmth':
+                        # Color temperature adjustment
+                        warmth_factor = self.convert_scale_to_factor(value, adj_type)
+                        if warmth_factor > 0:  # Warmer (more orange/red)
+                            rgb_normalized[:, :, 0] *= (1.0 + warmth_factor * 0.2)  # Boost red
+                            rgb_normalized[:, :, 1] *= (1.0 + warmth_factor * 0.1)  # Slight green boost
+                            rgb_normalized[:, :, 2] *= (1.0 - warmth_factor * 0.2)  # Reduce blue
+                        else:  # Cooler (more blue)
+                            rgb_normalized[:, :, 0] *= (1.0 + warmth_factor * 0.2)  # Reduce red
+                            rgb_normalized[:, :, 1] *= (1.0 + warmth_factor * 0.1)  # Slight green reduction
+                            rgb_normalized[:, :, 2] *= (1.0 - warmth_factor * 0.2)  # Boost blue
+                        
+                        rgb_normalized = np.clip(rgb_normalized, 0.0, 1.0)
+                    
+                    elif adj_type == 'tint':
+                        # Green-magenta tint adjustment
+                        tint_factor = self.convert_scale_to_factor(value, adj_type)
+                        if tint_factor > 0:  # More magenta
+                            rgb_normalized[:, :, 0] *= (1.0 + tint_factor * 0.1)  # Boost red slightly
+                            rgb_normalized[:, :, 1] *= (1.0 - tint_factor * 0.2)  # Reduce green
+                            rgb_normalized[:, :, 2] *= (1.0 + tint_factor * 0.1)  # Boost blue slightly
+                        else:  # More green
+                            rgb_normalized[:, :, 0] *= (1.0 + tint_factor * 0.1)  # Reduce red slightly
+                            rgb_normalized[:, :, 1] *= (1.0 - tint_factor * 0.2)  # Boost green
+                            rgb_normalized[:, :, 2] *= (1.0 + tint_factor * 0.1)  # Reduce blue slightly
+                        
+                        rgb_normalized = np.clip(rgb_normalized, 0.0, 1.0)
+                    
+                    elif adj_type in ['clarity', 'structure']:
+                        # Clarity/structure (midtone contrast enhancement)
+                        factor = self.convert_scale_to_factor(value, adj_type)
+                        if factor != 1.0:
+                            # Create midtone mask (areas between 0.2 and 0.8)
+                            midtone_mask = (rgb_normalized > 0.2) & (rgb_normalized < 0.8)
+                            # Apply contrast enhancement to midtones
+                            enhanced = np.clip(((rgb_normalized - 0.5) * factor) + 0.5, 0.0, 1.0)
+                            rgb_normalized = np.where(midtone_mask, enhanced, rgb_normalized)
+            
+            # Convert back to 0-255 range
+            rgb_final = np.clip(rgb_normalized * 255.0, 0, 255).astype(np.uint8)
+            
+            # Recombine with alpha channel if present
+            if has_alpha:
+                result_array = np.zeros((img_array.shape[0], img_array.shape[1], 4), dtype=np.uint8)
+                result_array[:, :, :3] = rgb_final
+                result_array[:, :, 3] = alpha_array.astype(np.uint8)
+                result_image = Image.fromarray(result_array, 'RGBA')
+            else:
+                result_image = Image.fromarray(rgb_final, 'RGB')
+            
+            logger.info(f"Applied {len([k for k, v in adjustments.items() if v != 0])} color adjustments")
+            
+            return result_image
+            
+        except Exception as e:
+            logger.error(f"Error applying Photoshop-style adjustments: {str(e)}")
+            logger.error(traceback.format_exc())
+            return image
+
+# ==========================================
+# ARTWORK PROCESSING PIPELINE
+# ==========================================
+
+class ArtworkProcessor:
+    """Complete artwork processing pipeline combining all operations."""
+
+    def __init__(self):
+        self.geometric = GeometricProcessor()
+        self.blend_processor = TiledBlendProcessor()
+        self.color_adjustments = PhotoshopColorAdjustments()
+
+    def process_single_artwork(self, artwork_data, transform_points, output_size, 
+                            template_name, smart_object_name, aspect_ratio, 
+                            record_id, white_backing_data=None, 
+                            background_data=None, blend_mode='multiply', 
+                            opacity=255, manual_adjustments_json=None,
+                            tile_size=(128, 128)):
+        """
+        Complete pipeline: load → transform → blend → adjust → save.
+
+        Args:
+            artwork_data: BytesIO object with artwork image data
+            transform_points: List of (x,y) coordinates defining frame placement
+            output_size: Tuple of (width, height) for output
+            template_name: Name of the template
+            smart_object_name: Name of the smart object layer
+            aspect_ratio: Aspect ratio string (e.g., '1:1')
+            record_id: Airtable record ID
+            white_backing_data: BytesIO object with white backing image
+            background_data: BytesIO object with background (fallback)
+            blend_mode: Primary blend mode ('multiply', 'luminosity', etc.)
+            opacity: Opacity value (0-255)
+            manual_adjustments_json: JSON string with Photoshop-style adjustments
+            tile_size: Tuple for tile dimensions (default 128x128)
+            
+        Returns:
+            Tuple of (s3_url, adjustments_applied)
+        """
+        # Variables for cleanup tracking
+        # Variables for cleanup tracking
+        cleanup_vars = {
+            'artwork': None,
+            'white_backing': None,
+            'artwork_resized': None,
+            'warped_artwork': None,
+            'multiply_result': None,  # NEW: Track multiply result
+            'blended_result': None,
+            'final_result': None,
+            'output_buffer': None,
+            'warped_buffer': None,
+            'backing_buffer': None
+        }
+
+        try:
+            logger.info(f"Starting complete artwork processing for {smart_object_name}")
+            
+            # Validate inputs
+            if not white_backing_data:
+                raise ValueError("White backing data is required for multiply blend mode")
+            
+            # Step 1: Load and prepare images
+            cleanup_vars['artwork'] = Image.open(artwork_data).convert("RGBA")
+            cleanup_vars['white_backing'] = Image.open(white_backing_data).convert("RGBA")
+            
+            logger.info(f"Artwork: {cleanup_vars['artwork'].size}, White backing: {cleanup_vars['white_backing'].size}")
+            
+            # Step 2: Calculate frame region and target dimensions
+            frame_region = self.geometric.calculate_frame_region_with_padding(transform_points, padding=4)
+            target_width, target_height = self.geometric.calculate_target_dimensions(transform_points)
+            
+            logger.info(f"Target artwork dimensions: {target_width}x{target_height}")
+            
+            # Step 3: Resize artwork
+            from PIL import ImageOps
+            cleanup_vars['artwork_resized'] = ImageOps.contain(
+                cleanup_vars['artwork'], 
+                (target_width, target_height)
+            )
+            
+            # Free original artwork
+            del cleanup_vars['artwork']
+            cleanup_vars['artwork'] = None
+            gc.collect()
+            
+            # Step 4: Apply perspective transformation
+            source_points = [
+                (0, 0),
+                (cleanup_vars['artwork_resized'].width, 0),
+                (cleanup_vars['artwork_resized'].width, cleanup_vars['artwork_resized'].height),
+                (0, cleanup_vars['artwork_resized'].height)
+            ]
+            
+            logger.info("Applying perspective transform...")
+            cleanup_vars['warped_artwork'] = self.geometric.apply_perspective_transform(
+                cleanup_vars['artwork_resized'],
+                source_points,
+                transform_points,
+                output_size
+            )
+            
+            # Apply edge smoothing
+            cleanup_vars['warped_artwork'] = self.geometric.smooth_edges(cleanup_vars['warped_artwork'])
+            
+            # Free resized artwork
+            del cleanup_vars['artwork_resized']
+            cleanup_vars['artwork_resized'] = None
+            gc.collect()
+            
+            # Step 5: Upload images for tiled blending
+            sanitized_template_name = template_name.replace(' ', '_').lower()
+            sanitized_aspect_ratio = aspect_ratio.replace(':', '_')
+            
+            # Upload warped artwork
+            cleanup_vars['warped_buffer'] = BytesIO()
+            cleanup_vars['warped_artwork'].save(cleanup_vars['warped_buffer'], format='PNG')
+            cleanup_vars['warped_buffer'].seek(0)
+            
+            warped_key = f"temp-warped/{sanitized_template_name}_{smart_object_name}_{sanitized_aspect_ratio}_{record_id}_temp.png"
+            warped_url = s3_handler.upload_file_obj(cleanup_vars['warped_buffer'], warped_key, content_type='image/png')
+            
+            # Upload white backing
+            cleanup_vars['backing_buffer'] = BytesIO()
+            cleanup_vars['white_backing'].save(cleanup_vars['backing_buffer'], format='PNG')
+            cleanup_vars['backing_buffer'].seek(0)
+            
+            backing_key = f"temp-backing/{sanitized_template_name}_{aspect_ratio}_{record_id}_temp.png"
+            backing_url = s3_handler.upload_file_obj(cleanup_vars['backing_buffer'], backing_key, content_type='image/png')
+            
+            # Free memory
+            del cleanup_vars['warped_artwork'], cleanup_vars['white_backing']
+            del cleanup_vars['warped_buffer'], cleanup_vars['backing_buffer']
+            cleanup_vars['warped_artwork'] = cleanup_vars['white_backing'] = None
+            cleanup_vars['warped_buffer'] = cleanup_vars['backing_buffer'] = None
+            gc.collect()
+            
+            # Step 6A: Apply vectorized tiled blending
+            opacity_normalized = opacity / 255.0
+
+            # Get global luminosity strength from manual adjustments JSON (0-100 scale, default to 20)
+            luminosity_strength = 20  # Default
+            if manual_adjustments_json:
+                global_settings = self.color_adjustments.parse_global_settings(manual_adjustments_json)
+                luminosity_strength = global_settings.get('luminosity_blend_strength', 20)
+
+            # Convert to 0-1 opacity for blending
+            luminosity_opacity = luminosity_strength / 100.0
+
+            logger.info(f"Applying {blend_mode} blend mode + luminosity blend (strength: {luminosity_strength}%) with vectorized tiled processing")
+
+            # First pass: Apply multiply blend mode
+            cleanup_vars['multiply_result'] = self.blend_processor.blend_images_tiled(
+                warped_url,
+                backing_url,
+                frame_region,
+                blend_mode=blend_mode,  # Usually 'multiply'
+                tile_size=tile_size,
+                opacity=opacity_normalized
+            )
+
+            logger.info(f"Completed multiply blend, now applying luminosity blend on top")
+
+            # Upload multiply result for luminosity blend input
+            multiply_buffer = BytesIO()
+            cleanup_vars['multiply_result'].save(multiply_buffer, format='PNG')
+            multiply_buffer.seek(0)
+
+            multiply_key = f"temp-multiply/{sanitized_template_name}_{smart_object_name}_{sanitized_aspect_ratio}_{record_id}_multiply.png"
+            multiply_url = s3_handler.upload_file_obj(multiply_buffer, multiply_key, content_type='image/png')
+
+            # Free multiply result from memory temporarily
+            del cleanup_vars['multiply_result']
+            cleanup_vars['multiply_result'] = None
+            del multiply_buffer
+            gc.collect()
+
+            # Second pass: Apply luminosity blend mode on top
+            cleanup_vars['blended_result'] = self.blend_processor.blend_images_tiled(
+                warped_url,  # Original artwork (luminosity source)
+                multiply_url,  # Multiply result (base)
+                frame_region,
+                blend_mode='luminosity',
+                tile_size=tile_size,
+                opacity=luminosity_opacity  # Configurable luminosity strength (default 20%)
+            )
+
+            logger.info(f"Completed luminosity blend ({luminosity_opacity:.1%} opacity) on top of multiply result")
+
+
+            
+            # Step 7: Apply Photoshop-style color adjustments
+            manual_adjustments = None
+            if manual_adjustments_json:
+                manual_adjustments = self.color_adjustments.parse_adjustments(manual_adjustments_json, smart_object_name)
+            
+            if manual_adjustments:
+                logger.info(f"Applying Photoshop-style color adjustments for {smart_object_name}")
+                cleanup_vars['final_result'] = self.color_adjustments.apply_adjustments_vectorized(
+                    cleanup_vars['blended_result'], 
+                    manual_adjustments
                 )
-                # Free memory for the dummy background
-                del dummy_background
+                
+                # Free blended result
+                del cleanup_vars['blended_result']
+                cleanup_vars['blended_result'] = None
                 gc.collect()
-        
-        # Create source points from the artwork dimensions
-        source_points = [
-            (0, 0),                                      # Top-left
-            (artwork_processed.width, 0),                  # Top-right
-            (artwork_processed.width, artwork_processed.height),  # Bottom-right
-            (0, artwork_processed.height)                  # Bottom-left
-        ]
-        
-        # Apply perspective transform for precise placement
-        logger.info("Applying perspective transform...")
-        warped_artwork = apply_perspective_transform(
-            artwork_processed,
-            source_points,
-            transform_points,
-            output_size
-        )
-        
-        # Free memory for the processed artwork as we now have the warped version
-        del artwork_processed
-        if background:
-            del background
-        gc.collect()
-        
-        # Save to BytesIO object and optimize memory
-        output_buffer = BytesIO()
-        warped_artwork.save(output_buffer, format='PNG', optimize=True)
-        output_buffer.seek(0)
-        
-        # Free memory for the warped artwork
-        del warped_artwork
-        gc.collect()
-        
-        # Generate S3 key for the warped artwork
-        sanitized_template_name = template_name.replace(' ', '_').lower()
-        sanitized_aspect_ratio = aspect_ratio.replace(':', '_')
-        output_key = f"warped-artworks/{sanitized_template_name}_{smart_object_name}_{sanitized_aspect_ratio}_{record_id}.png"
-        
-        # Upload to S3
-        s3_url = s3_handler.upload_file_obj(
-            output_buffer,
-            output_key,
-            content_type='image/png'
-        )
-        
-        return s3_url
-    except Exception as e:
-        logger.error(f"Error warping artwork: {str(e)}")
-        logger.error(traceback.format_exc())
-        return None
-        
-def process_mockup(template_name, backgrounds, coordinates, blend_modes, artworks, record_id):
-    """Process mockup using template backgrounds and coordinates with adaptive color matching"""
+            else:
+                logger.info("No color adjustments to apply")
+                cleanup_vars['final_result'] = cleanup_vars['blended_result']
+                cleanup_vars['blended_result'] = None
+            
+            # Step 8: Save final result
+            cleanup_vars['output_buffer'] = BytesIO()
+            cleanup_vars['final_result'].save(
+                cleanup_vars['output_buffer'],
+                format='PNG',
+                optimize=True,
+                compress_level=6
+            )
+            cleanup_vars['output_buffer'].seek(0)
+
+            # Calculate file size
+            file_size_mb = len(cleanup_vars['output_buffer'].getvalue()) / (1024 * 1024)
+            
+            # Upload final result
+            output_key = f"warped-artworks/{sanitized_template_name}_{smart_object_name}_{sanitized_aspect_ratio}_{record_id}_final.png"
+            s3_url = s3_handler.upload_file_obj(cleanup_vars['output_buffer'], output_key, content_type='image/png')
+            
+            
+            logger.info(f"Successfully created final artwork: {s3_url} ({file_size_mb:.2f}MB)")
+            
+            # Return results
+            adjustments_applied = {
+                'blend_mode': blend_mode,
+                'opacity': opacity_normalized,
+                'tile_size': tile_size,
+                'frame_region': frame_region,
+                'color_adjustments_applied': manual_adjustments is not None,
+                'color_adjustments': manual_adjustments,
+                'file_size_mb': file_size_mb
+            }
+            
+            return s3_url, adjustments_applied  
+        except Exception as e:
+            logger.error(f"Error in artwork processing: {str(e)}")
+            logger.error(traceback.format_exc())
+            return None, None
+        finally:
+            # Comprehensive cleanup
+            for var_name, var_obj in cleanup_vars.items():
+                try:
+                    if var_obj is not None:
+                        del var_obj
+                except:
+                    pass
+            gc.collect()
+
+# ==========================================
+# MAIN MOCKUP PROCESSING FUNCTION
+# ==========================================
+def process_mockup(template_name, backgrounds, coordinates, blend_modes, 
+                 artworks, record_id, use_local_mockup=True, 
+                 intelligent_scaling=True, manual_adjustments_json=None,
+                 white_backings=None):
+    """
+    Process mockup with multiply blend modes and Photoshop-style color adjustments.
+
+    Args:
+    template_name: Name of the template
+    backgrounds: Dictionary of aspect ratios to background URLs
+    coordinates: Dictionary of aspect ratios to coordinates JSON
+    blend_modes: Dictionary of aspect ratios to blend modes JSON
+    artworks: Dictionary of layer names to artwork URLs
+    record_id: Airtable record ID
+    use_local_mockup: Whether to use local mockup generation
+    intelligent_scaling: Whether to use intelligent scaling
+    manual_adjustments_json: JSON string with Photoshop-style adjustments
+    white_backings: Dictionary of aspect ratios to white backing URLs
+
+    Returns:
+    Dictionary with results including adjustment JSON
+    """
+    # Initialize processor
+    artwork_processor = ArtworkProcessor()
+
+    # Track whether we're using manual adjustments
+    using_manual_adjustments = manual_adjustments_json and manual_adjustments_json.strip() != ""
+
+    logger.info(f"Processing mockup with blend modes and color adjustments")
+    logger.info(f"Using manual adjustments: {using_manual_adjustments}")
+    logger.info(f"White backings provided: {white_backings is not None}")
+
     results = {
         'warped_artworks': {},
         'mockup_urls': {},
-        'aspect_ratios_processed': []
+        'aspect_ratios_processed': [],
+        'adjustment_settings': {}
     }
-    
-    # Filter artworks dictionary to only include non-empty values
+
+    # Filter artworks
     valid_artworks = {k: v for k, v in artworks.items() if v}
     logger.info(f"Valid artworks: {list(valid_artworks.keys())}")
-    
+
+    # Generate default adjustment JSON if no manual adjustments provided
+    if not using_manual_adjustments:
+        logger.info("Generating default adjustment settings")
+        default_adjustments_json = PhotoshopColorAdjustments.create_adjustments_json(
+        list(valid_artworks.keys())
+        )
+        results['default_adjustments_json'] = default_adjustments_json
+
     for aspect_ratio, background_url in backgrounds.items():
         if not background_url:
             logger.info(f"No background provided for aspect ratio {aspect_ratio}, skipping")
             continue
-            
+
         # Check if we have coordinates for this aspect ratio
         if aspect_ratio not in coordinates or not coordinates[aspect_ratio]:
             logger.warning(f"No coordinates for aspect ratio {aspect_ratio}, skipping")
             continue
-            
+
         try:
             # Parse coordinates JSON
             try:
                 full_data = json.loads(coordinates[aspect_ratio])
                 coord_data = full_data.get('coordinates', {})
-                # Extract blend modes from the same JSON if available
                 aspect_blend_modes = full_data.get('blend_modes', {})
             except json.JSONDecodeError:
                 logger.error(f"Invalid JSON in coordinates for {aspect_ratio}")
                 continue
-            
+
             # Override with separate blend modes if provided
             if aspect_ratio in blend_modes:
                 blend_data = blend_modes[aspect_ratio]
@@ -1161,36 +1280,64 @@ def process_mockup(template_name, backgrounds, coordinates, blend_modes, artwork
                     except json.JSONDecodeError:
                         logger.warning(f"Could not parse blend modes for {aspect_ratio}")
                         blend_data = {}
-                
+
                 if 'blend_modes' in blend_data:
                     aspect_blend_modes = blend_data['blend_modes']
                 else:
                     aspect_blend_modes = blend_data
-            
-            # Download background image once for all artworks in this aspect ratio
+
+            # Download background image for dimension checking
             background_data = s3_handler.download_file(background_url)
-            
-            # Load background and check size
+
+            # Get white backing if available
+            white_backing_data = None
+            if white_backings and aspect_ratio in white_backings and white_backings[aspect_ratio]:
+                try:
+                    white_backing_url = white_backings[aspect_ratio]
+                    white_backing_data = s3_handler.download_file(white_backing_url)
+                    logger.info(f"Downloaded white backing for {aspect_ratio}: {white_backing_url}")
+                except Exception as wb_error:
+                    logger.warning(f"Could not download white backing for {aspect_ratio}: {str(wb_error)}")
+                    white_backing_data = None
+            else:
+                logger.info(f"No white backing provided for {aspect_ratio}")
+
+            # Load background and check size for scaling
             bg_image = Image.open(background_data)
             width, height = bg_image.width, bg_image.height
-            
-            # Check if background is very large and needs downscaling for processing
-            # We'll still use the original background URL for Renderform
+            orig_width, orig_height = width, height
+
+            # Check if background needs downscaling for processing
             total_pixels = width * height
-            MAX_PROCESSING_PIXELS = 9000000  # ~9 megapixels is a good balance
-            
-            # If background is too large, scale it down for processing
+            MAX_PROCESSING_PIXELS = 9000000  # ~9 megapixels
+
             if total_pixels > MAX_PROCESSING_PIXELS:
                 scale_factor = (MAX_PROCESSING_PIXELS / total_pixels) ** 0.5
                 new_width = int(width * scale_factor)
                 new_height = int(height * scale_factor)
-                
-                logger.info(f"Background is very large ({width}x{height}), downscaling to {new_width}x{new_height} for processing")
-                
-                # Scale down the background for memory efficiency
+
+                logger.info(f"Background is large ({width}x{height}), downscaling to {new_width}x{new_height}")
+
+                # Scale down the background
                 bg_image = bg_image.resize((new_width, new_height), Image.LANCZOS)
-                
-                # Also scale down the transform points
+
+                # Scale down white backing if available
+                if white_backing_data:
+                    try:
+                        wb_image = Image.open(white_backing_data)
+                        wb_image_scaled = wb_image.resize((new_width, new_height), Image.LANCZOS)
+
+                        wb_buffer = BytesIO()
+                        wb_image_scaled.save(wb_buffer, format='PNG')
+                        wb_buffer.seek(0)
+                        white_backing_data = wb_buffer
+
+                        del wb_image, wb_image_scaled
+                        gc.collect()
+                    except Exception as wb_scale_error:
+                        logger.warning(f"Could not scale white backing: {str(wb_scale_error)}")
+
+                # Scale coordinates
                 scaled_coord_data = {}
                 for obj_name, points in coord_data.items():
                     scaled_points = []
@@ -1198,130 +1345,515 @@ def process_mockup(template_name, backgrounds, coordinates, blend_modes, artwork
                         if isinstance(point, (list, tuple)) and len(point) >= 2:
                             scaled_points.append((point[0] * scale_factor, point[1] * scale_factor))
                         else:
-                            # If point format is unexpected, skip this object
-                            logger.warning(f"Invalid point format in {obj_name}, skipping: {point}")
+                            logger.warning(f"Invalid point format in {obj_name}: {point}")
                             scaled_points = []
                             break
-                    
+
                     if scaled_points:
                         scaled_coord_data[obj_name] = scaled_points
-                
-                # Use scaled coordinates
-                original_coord_data = coord_data
+
                 coord_data = scaled_coord_data
-                
-                # Reset the background data for further processing
+
+                # Update background data
                 bg_buffer = BytesIO()
                 bg_image.save(bg_buffer, format='PNG')
                 bg_buffer.seek(0)
                 background_data = bg_buffer
-            
+
             output_size = (bg_image.width, bg_image.height)
-            
-            # Rewind background data for future use
             background_data.seek(0)
-            
-            # Process each artwork
+            if white_backing_data:
+                white_backing_data.seek(0)
+
+            # Filter coordinates to available artworks
+            available_coord_data = {}
+            for smart_obj_name, artwork_url in valid_artworks.items():
+                coord_key = None
+                # Try multiple naming variations
+                if smart_obj_name in coord_data:
+                    coord_key = smart_obj_name
+                elif smart_obj_name.startswith('Print') and len(smart_obj_name) > 5:
+                    spaced_name = smart_obj_name[:5] + ' ' + smart_obj_name[5:]
+                    if spaced_name in coord_data:
+                        coord_key = spaced_name
+                else:
+                    no_space_name = smart_obj_name.replace(' ', '')
+                    if no_space_name in coord_data:
+                        coord_key = no_space_name
+
+                if coord_key:
+                    available_coord_data[smart_obj_name] = coord_data[coord_key]
+
+            logger.info(f"Available coordinates for {len(available_coord_data)} artworks: {list(available_coord_data.keys())}")
+
+            # Process each artwork with complete pipeline
             warped_artworks = {}
             for smart_obj_name, artwork_url in valid_artworks.items():
-                if smart_obj_name not in coord_data:
+                if smart_obj_name not in available_coord_data:
                     logger.warning(f"No coordinates for {smart_obj_name} in {aspect_ratio}, skipping")
                     continue
-                
-                # Get transform points from coordinates
-                transform_points = coord_data[smart_obj_name]
-                
-                # Get blend info for this smart object
-                blend_info = aspect_blend_modes.get(smart_obj_name, {})
-                blend_mode = blend_info.get('blend_mode', 'normal')
+
+                # Get transform points
+                transform_points = available_coord_data[smart_obj_name]
+
+                # Get blend info
+                blend_info = {}
+                for potential_name in [smart_obj_name, smart_obj_name.replace(' ', ''), smart_obj_name.replace('Print', 'Print ')]:
+                    if potential_name in aspect_blend_modes:
+                        blend_info = aspect_blend_modes[potential_name]
+                        break
+
+                blend_mode = blend_info.get('blend_mode', 'multiply')  # Default to multiply
                 opacity = blend_info.get('opacity', 255)
-                
-                logger.info(f"Processing {smart_obj_name} with blend mode: {blend_mode}, opacity: {opacity}")
-                
+
                 # Download artwork
                 artwork_data = s3_handler.download_file(artwork_url)
-                
-                # Make a fresh copy of background data for each artwork
+
+                # Prepare data copies
                 background_copy = BytesIO(background_data.getvalue())
-                
+                white_backing_copy = None
+                if white_backing_data:
+                    white_backing_copy = BytesIO(white_backing_data.getvalue())
+
                 try:
-                    # Process artwork with blend mode and color matching
-                    warped_url = warp_artwork(
-                        artwork_data,
-                        transform_points,
-                        output_size,
-                        template_name,
-                        smart_obj_name,
-                        aspect_ratio,
-                        record_id,
-                        background_copy,  # Pass background for color matching
-                        blend_mode,
-                        opacity
-                    )
-                    
-                    if warped_url:
-                        warped_artworks[smart_obj_name] = warped_url
-                        logger.info(f"Successfully processed {smart_obj_name}: {warped_url}")
+                    # Use the complete artwork processing pipeline
+                    if white_backing_copy:
+                        logger.info(f"Processing {smart_obj_name} with complete pipeline")
+
+                        # NEW: Pass blend_info to the processor
+                        # artwork_processor._current_blend_info = blend_info  # Store blend info temporarily
+
+                        result = artwork_processor.process_single_artwork(
+                            artwork_data,
+                            transform_points,
+                            output_size,
+                            template_name,
+                            smart_obj_name,
+                            aspect_ratio,
+                            record_id,
+                            white_backing_copy,
+                            background_copy,
+                            blend_mode,
+                            opacity,
+                            manual_adjustments_json
+                        )
+
+                        # Clean up temporary blend info
+                        # artwork_processor._current_blend_info = None
+                    else:
+                        # Fallback for no white backing
+                        logger.warning(f"No white backing for {smart_obj_name}, skipping")
+                        continue
+
+                    # Handle result
+                    if isinstance(result, tuple) and len(result) == 2:
+                        warped_url, adjustment_info = result
+                        if warped_url:
+                            warped_artworks[smart_obj_name] = warped_url
+                            # Store adjustment info for this artwork
+                            if adjustment_info and 'color_adjustments' in adjustment_info:
+                                results['adjustment_settings'][smart_obj_name] = adjustment_info['color_adjustments']
+                            logger.info(f"Successfully processed {smart_obj_name}: {warped_url}")
+                    else:
+                        warped_url = result
+                        if warped_url:
+                            warped_artworks[smart_obj_name] = warped_url
+                            logger.info(f"Successfully processed {smart_obj_name}: {warped_url}")
+
                 except Exception as e:
                     logger.error(f"Error processing {smart_obj_name}: {str(e)}")
                     logger.error(traceback.format_exc())
                     continue
-                
+
                 # Clean up
                 del artwork_data, background_copy
+                if white_backing_copy:
+                    del white_backing_copy
                 gc.collect()
-            
+
             # Clean up background resources
             del background_data, bg_image
+            if white_backing_data:
+                del white_backing_data
             gc.collect()
-            
-            # Create final mockup using Renderform
+
+            # Create final mockup using local generator
             if warped_artworks:
                 try:
-                    mockup_result = renderform_handler.create_mockup(
-                        aspect_ratio,
-                        background_url,
-                        warped_artworks
-                    )
-                    if mockup_result and 'href' in mockup_result:
-                        results['mockup_urls'][aspect_ratio] = mockup_result['href']
-                        results['aspect_ratios_processed'].append(aspect_ratio)
-                        logger.info(f"Created final mockup for {aspect_ratio}: {mockup_result['href']}")
+                    if use_local_mockup:
+                        from local_mockup_generator import create_local_mockup, extract_blend_info
+
+                        blend_modes_dict, opacities_dict = extract_blend_info(coordinates[aspect_ratio])
+
+                        logger.info(f"Creating local mockup for {aspect_ratio} with {len(warped_artworks)} layers")
+
+                        bg_original_dimensions = (orig_width, orig_height)
+
+                        mockup_url = create_local_mockup(
+                            background_url,
+                            warped_artworks,
+                            blend_modes=blend_modes_dict,
+                            opacities=opacities_dict,
+                            chunk_size=500,
+                            record_id=record_id,
+                            intelligent_scaling=intelligent_scaling,
+                            original_dimensions=bg_original_dimensions
+                        )
+
+                        if mockup_url:
+                            results['mockup_urls'][aspect_ratio] = mockup_url
+                            results['aspect_ratios_processed'].append(aspect_ratio)
+                            logger.info(f"Created local mockup for {aspect_ratio}: {mockup_url}")
+                    else:
+                        # Use Renderform as fallback
+                        mockup_result = renderform_handler.create_mockup(
+                            aspect_ratio,
+                            background_url,
+                            warped_artworks
+                        )
+                        if mockup_result and 'href' in mockup_result:
+                            results['mockup_urls'][aspect_ratio] = mockup_result['href']
+                            results['aspect_ratios_processed'].append(aspect_ratio)
+                            logger.info(f"Created Renderform mockup for {aspect_ratio}: {mockup_result['href']}")
                 except Exception as e:
-                    logger.error(f"Error creating final mockup for {aspect_ratio}: {str(e)}")
-            
+                    logger.error(f"Error creating mockup for {aspect_ratio}: {str(e)}")
+
             # Store warped artwork URLs
             if aspect_ratio not in results['warped_artworks']:
                 results['warped_artworks'][aspect_ratio] = {}
             results['warped_artworks'][aspect_ratio].update(warped_artworks)
-            
+
             logger.info(f"Successfully processed mockup for {aspect_ratio}")
+
         except Exception as e:
             logger.error(f"Error processing mockup for aspect ratio {aspect_ratio}: {str(e)}")
             logger.error(traceback.format_exc())
-    
+
     # Format response for Airtable
-    airtable_updates = {}
-    
-    # Add warped artwork URLs to update fields
-    for aspect_ratio, artworks_dict in results['warped_artworks'].items():
-        for print_name, url in artworks_dict.items():
-            field_name = f"{print_name} ({aspect_ratio})"
-            airtable_updates[field_name] = url
-    
-    # Add mockup URLs to update fields
-    for aspect_ratio, url in results['mockup_urls'].items():
-        airtable_updates[f"Ad Mockup ({aspect_ratio})"] = url
-    
-    # Update status
-    if results['aspect_ratios_processed']:
-        process_status = f"Success: Processed {len(results['aspect_ratios_processed'])} mockups"
-    else:
-        process_status = "Failed: No mockups could be processed"
-    
-    airtable_updates['Upload Status'] = process_status
-    
+    airtable_updates = format_airtable_response(results, using_manual_adjustments)
+
     return {
-        'airtable_updates': airtable_updates,
-        'detailed_results': results
+    'airtable_updates': airtable_updates,
+    'detailed_results': results
     }
+
+# ==========================================
+# UTILITY FUNCTIONS
+# ==========================================
+
+def format_airtable_response(results, using_manual_adjustments):
+   """Format processing results for Airtable update."""
+   airtable_updates = {}
+   
+   # Add warped artwork URLs
+   for aspect_ratio, artworks_dict in results['warped_artworks'].items():
+       for print_name, url in artworks_dict.items():
+           field_name = f"{print_name} ({aspect_ratio})"
+           airtable_updates[field_name] = url
+   
+   # Add mockup URLs
+   for aspect_ratio, url in results['mockup_urls'].items():
+       airtable_updates[f"Ad Mockup ({aspect_ratio})"] = url
+   
+   # Handle adjustment JSON - either save default or preserve existing manual adjustments
+   if not using_manual_adjustments and 'default_adjustments_json' in results:
+       # First run - save default adjustment settings for user to edit
+       airtable_updates['Mockup Adjustments'] = results['default_adjustments_json']
+       logger.info("Saving default adjustment settings to Airtable for first-time setup")
+   elif using_manual_adjustments:
+       # Using manual adjustments - don't overwrite the field
+       logger.info("Using manual adjustments - preserving existing Mockup Adjustments field")
+   else:
+       # No adjustments to save
+       logger.info("No adjustment settings to update")
+   
+   # Update status
+   if results['aspect_ratios_processed']:
+       if not using_manual_adjustments:
+           process_status = f"Success: Processed {len(results['aspect_ratios_processed'])} mockups with default settings (edit Mockup Adjustments to fine-tune colors)"
+       else:
+           num_adjusted = len([k for k, v in results['adjustment_settings'].items() if v])
+           process_status = f"Success: Processed {len(results['aspect_ratios_processed'])} mockups with {num_adjusted} custom color adjustments"
+   else:
+       process_status = "Failed: No mockups could be processed"
+   
+   airtable_updates['Upload Status'] = process_status
+   
+   return airtable_updates
+
+def get_memory_usage_mb():
+   """Get current memory usage in MB, with fallback if psutil is not available"""
+   try:
+       import psutil
+       import os
+       process = psutil.Process(os.getpid())
+       return process.memory_info().rss / (1024 * 1024)
+   except ImportError:
+       return -1  # Indicates memory usage couldn't be determined
+
+def extract_surrounding_region(background_image, transform_points, expansion_factor=0.5):
+   """
+   Extract a region surrounding (but excluding) the artwork placement area.
+   Kept for fallback compatibility.
+   """
+   try:
+       # Ensure transform_points are in the right format (tuples or lists)
+       points = []
+       for point in transform_points:
+           if isinstance(point, (list, tuple)) and len(point) >= 2:
+               points.append((float(point[0]), float(point[1])))
+           else:
+               raise ValueError(f"Invalid point format: {point}")
+               
+       # Calculate the bounding box of the transform points
+       x_coords = [p[0] for p in points]
+       y_coords = [p[1] for p in points]
+       min_x, max_x = min(x_coords), max(x_coords)
+       min_y, max_y = min(y_coords), max(y_coords)
+       
+       # Calculate center point
+       center_x = (min_x + max_x) / 2
+       center_y = (min_y + max_y) / 2
+       
+       # Calculate width and height of the original bounding box
+       width = max_x - min_x
+       height = max_y - min_y
+       
+       # Calculate expanded bounding box (with expansion_factor)
+       expanded_width = width * (1 + expansion_factor * 2)  # Expand on both sides
+       expanded_height = height * (1 + expansion_factor * 2)
+       
+       # Calculate expanded bounds, ensuring they stay within image dimensions
+       exp_min_x = max(0, int(center_x - expanded_width / 2))
+       exp_max_x = min(background_image.width, int(center_x + expanded_width / 2))
+       exp_min_y = max(0, int(center_y - expanded_height / 2))
+       exp_max_y = min(background_image.height, int(center_y + expanded_height / 2))
+       
+       # Create a mask for the expanded region
+       mask = Image.new('L', background_image.size, 0)
+       mask_draw = ImageDraw.Draw(mask)
+       
+       # Fill the expanded rectangle
+       mask_draw.rectangle([(exp_min_x, exp_min_y), (exp_max_x, exp_max_y)], fill=255)
+       
+       # Now subtract the original artwork area by filling it with black
+       mask_draw.polygon(points, fill=0)
+       
+       # Use the mask to extract the region
+       surrounding_region = Image.new('RGBA', background_image.size, (0, 0, 0, 0))
+       surrounding_region.paste(background_image, (0, 0), mask)
+       
+       # Crop to the expanded bounds
+       cropped_region = surrounding_region.crop((exp_min_x, exp_min_y, exp_max_x, exp_max_y))
+       
+       # Safety check for empty images
+       if cropped_region.size[0] <= 1 or cropped_region.size[1] <= 1 or cropped_region.getextrema()[0][1] == 0:
+           logger.warning("Extracted surrounding region is too small or empty, using full background")
+           # Use a portion of the background instead
+           full_width, full_height = background_image.size
+           return background_image.crop((0, 0, min(full_width, 800), min(full_height, 800)))
+           
+       return cropped_region
+   except Exception as e:
+       logger.error(f"Error extracting surrounding region: {str(e)}")
+       logger.error(traceback.format_exc())
+       # Return a portion of the background as fallback
+       return background_image
+
+def analyze_image_colors(image):
+   """
+   Analyze key color statistics of an image.
+   Kept for compatibility and diagnostics.
+   """
+   try:
+       from PIL import ImageStat
+       
+       # Convert image to RGBA to handle transparency
+       img_rgba = image.convert('RGBA')
+
+       # Split into channels
+       r, g, b, a = img_rgba.split()
+
+       # Threshold alpha to create a mask (1 where alpha >= 10, else 0)
+       alpha_threshold = 10
+       alpha_mask = a.point(lambda p: 255 if p >= alpha_threshold else 0)
+
+       # Merge RGB back to RGB image (drops alpha)
+       rgb_image = Image.merge("RGB", (r, g, b))
+
+       # Use ImageStat with the alpha mask to compute stats only on non-transparent pixels
+       stats = ImageStat.Stat(rgb_image, mask=alpha_mask)
+       
+       # Get mean values per channel
+       r_mean, g_mean, b_mean = stats.mean
+       
+       # Calculate brightness (0-255)
+       brightness = sum(stats.mean) / 3
+       
+       # Calculate color variance as a measure of colorfulness
+       r_var, g_var, b_var = stats.var
+       colorfulness = sum([r_var, g_var, b_var]) / 3
+       
+       # Calculate contrast
+       extrema = rgb_image.getextrema()
+       r_min, r_max = extrema[0]
+       g_min, g_max = extrema[1]
+       b_min, b_max = extrema[2]
+       contrast = (r_max - r_min + g_max - g_min + b_max - b_min) / 3
+       
+       # Calculate saturation (0-1 range)
+       max_mean = max(r_mean, g_mean, b_mean)
+       min_mean = min(r_mean, g_mean, b_mean)
+       
+       saturation = 0
+       if max_mean > 0:
+           saturation = (max_mean - min_mean) / max_mean
+       
+       # Calculate color temperature (warm vs cool)
+       color_temp = r_mean / (b_mean if b_mean > 0.1 else 0.1)
+       
+       # Calculate dominant color tone
+       if r_mean > g_mean and r_mean > b_mean:
+           dominant_tone = "red"
+       elif g_mean > r_mean and g_mean > b_mean:
+           dominant_tone = "green"
+       else:
+           dominant_tone = "blue"
+       
+       # Detect if image is mostly monochrome
+       color_variance = abs(r_mean - g_mean) + abs(r_mean - b_mean) + abs(g_mean - b_mean)
+       is_monochrome = color_variance < 30  # Threshold for considering image monochromatic
+       
+       return {
+           'brightness': brightness,
+           'saturation': saturation,
+           'contrast': contrast,
+           'colorfulness': colorfulness,
+           'color_temp': color_temp,
+           'r_mean': r_mean,
+           'g_mean': g_mean,
+           'b_mean': b_mean,
+           'dominant_tone': dominant_tone,
+           'is_monochrome': is_monochrome
+       }
+   except Exception as e:
+       logger.error(f"Error analyzing image colors: {str(e)}")
+       # Return default values as fallback
+       return {
+           'brightness': 128,
+           'saturation': 0.5,
+           'contrast': 128,
+           'colorfulness': 5000,
+           'color_temp': 1.0,
+           'r_mean': 128,
+           'g_mean': 128,
+           'b_mean': 128,
+           'dominant_tone': "neutral",
+           'is_monochrome': False
+       }
+
+# ==========================================
+# FALLBACK FUNCTIONS (for compatibility)
+# ==========================================
+
+def warp_artwork(artwork_data, transform_points, output_size, template_name, 
+                smart_object_name, aspect_ratio, record_id, background_data=None, 
+                blend_mode='normal', opacity=255, manual_adjustments=None):
+   """
+   Legacy fallback function for backward compatibility.
+   Redirects to the new artwork processor.
+   """
+   logger.warning("Using legacy warp_artwork function - consider migrating to ArtworkProcessor")
+   
+   # Create processor and use the new pipeline
+   processor = ArtworkProcessor()
+   
+   # Convert manual adjustments to JSON format if needed
+   manual_adjustments_json = None
+   if manual_adjustments:
+       # Wrap single adjustment in JSON structure
+       temp_json = {smart_object_name: manual_adjustments}
+       manual_adjustments_json = json.dumps(temp_json)
+   
+   return processor.process_single_artwork(
+       artwork_data, transform_points, output_size, template_name,
+       smart_object_name, aspect_ratio, record_id, 
+       white_backing_data=None,  # No white backing in legacy mode
+       background_data=background_data,
+       blend_mode=blend_mode,
+       opacity=opacity,
+       manual_adjustments_json=manual_adjustments_json
+   )
+
+# ==========================================
+# TESTING AND DEBUGGING FUNCTIONS
+# ==========================================
+
+def test_photoshop_adjustments():
+   """
+   Test function to verify Photoshop-style adjustments work correctly.
+   """
+   color_adjustments = PhotoshopColorAdjustments()
+   
+   # Create test adjustment JSON
+   test_adjustments = {
+       "Print1": {
+           "brightness": 20,      # +20% brighter
+           "contrast": 15,        # +15% more contrast
+           "saturation": -10,     # -10% less saturated
+           "warmth": 25,          # +25% warmer
+           "shadows": 30,         # +30% brighter shadows
+           "clarity": 10          # +10% more clarity
+       },
+       "Print2": {
+           "brightness": -5,      # -5% darker
+           "vibrance": 20,        # +20% more vibrant
+           "highlights": -15,     # -15% darker highlights
+           "tint": 5              # +5% more magenta
+       }
+   }
+   
+   # Generate JSON
+   smart_objects = ["Print1", "Print2", "Print3"]
+   adjustments_json = color_adjustments.create_adjustments_json(smart_objects, test_adjustments.get("Print1"))
+   
+   logger.info("Generated test adjustments JSON:")
+   logger.info(adjustments_json)
+   
+   # Test parsing
+   parsed = color_adjustments.parse_adjustments(adjustments_json, "Print1")
+   logger.info(f"Parsed adjustments for Print1: {parsed}")
+   
+   return adjustments_json
+
+def test_blend_modes():
+   """Test function to verify blend modes work correctly."""
+   blend_modes = PhotoshopBlendModes()
+   
+   # Create test images
+   test_size = (100, 100)
+   
+   # Red image
+   red_array = np.full((test_size[1], test_size[0], 4), [255, 0, 0, 255], dtype=np.uint8)
+   
+   # Blue image  
+   blue_array = np.full((test_size[1], test_size[0], 4), [0, 0, 255, 255], dtype=np.uint8)
+   
+   # Test multiply blend
+   multiply_result = blend_modes.multiply_blend(red_array, blue_array)
+   logger.info(f"Multiply blend result shape: {multiply_result.shape}")
+   logger.info(f"Multiply blend sample pixel: {multiply_result[50, 50]}")
+   
+   # Test luminosity blend
+   luminosity_result = blend_modes.luminosity_blend(blue_array, red_array, 0.5)
+   logger.info(f"Luminosity blend result shape: {luminosity_result.shape}")
+   logger.info(f"Luminosity blend sample pixel: {luminosity_result[50, 50]}")
+   
+   return True
+
+if __name__ == "__main__":
+   # Run tests if this file is executed directly
+   logger.info("Running processor.py tests...")
+   #test_photoshop_adjustments()
+   #test_blend_modes()
+   logger.info("Tests completed!")
