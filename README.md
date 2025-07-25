@@ -1,197 +1,156 @@
 # Print Mockup Processor
+**Lightweight, RAM-scalable mockup processing engine for Photoshop-prepped assets.**
 
-A sophisticated automated system for generating product mockups with intelligent color matching, Photoshop-style blend modes, and perspective transformation. Built for high-volume production workflows with Airtable integration.
 
 ## 🎯 Motivation & Problem
 
 ### **The Photoshop Scripting Limitation**
 
-While Photoshop scripting can automate mockup generation, it quickly becomes impractical for production use:
+While Photoshop scripting can automate mockup generation, it can become impractical for production use:
 
 - **Local File Management**: Hundreds of artwork files need to be downloaded and managed locally
 - **Database Disconnect**: No easy way to connect Photoshop scripts to modern databases and workflows
-- **Resource Intensive**: Photoshop requires significant RAM and processing power for each operation
+- **Resource Intensive**: Photoshop requires significant RAM and processing power for each operation and requires a device with Photoshop installed
 - **Enterprise API Barrier**: Adobe's Creative SDK API requires enterprise licensing with a minimum spend of $150,000+ USD
-- **Scalability Issues**: Running Photoshop instances for bulk processing is expensive and unreliable
 - **No Cloud Integration**: Difficult to integrate with cloud storage and modern web workflows
 
+### **The Real Challenge**
 
-### **The Solution**
-This engine extracts the **core capabilities of Photoshop's multiply blend mode and print placement** into a lightweight, automated system that:
-- **Preserves quality**: Uses the same mathematical blend modes as Photoshop
-- **Scales infinitely**: Process hundreds of mockups automatically
-- **Works anywhere**: Runs on 512MB RAM or scales to high-performance servers
-- **Integrates easily**: Works with any system that can send API requests
+Traditional bulk mockup generation creates a painful workflow:
 
-### **Key Innovation**
-The breakthrough is separating the **creative work** (done once in Photoshop) from the **production work** (automated at scale):
+1. **Manual Photoshop Work**: Each variation requires individual attention
+2. **File Management Nightmare**: Downloading, organizing, and processing hundreds of local files
+3. **Database Integration Gap**: No straightforward way to connect Photoshop to Airtable, Google Sheets, or modern databases
+4. **Resource Constraints**: Photoshop's memory requirements make bulk processing expensive
+5. **No API Access**: Adobe's enterprise API is cost-prohibitive for most businesses
 
-1. **Photoshop Prep** (Creative - Done Once):
-   - Design your mockup template
-   - Create color-corrected backing
-   - Set up smart object coordinates
+### **The Solution: Extract Photoshop's Power**
 
-2. **Automated Processing** (Production - Done Thousands of Times):
-   - Drop in any artwork
-   - Generate professional mockup instantly
-   - Perfect color matching and perspective
+This engine solves the core problem by **extracting Photoshop's essential capabilities** into a lightweight, API-driven system:
 
-This approach is **optimized for the art prints industry** where rectangular prints need to be placed on various backgrounds with realistic color blending.
+#### **What Was Preserved from Photoshop:**
+- ✅ **Exact multiply blend modes** - Same mathematical formulas as Photoshop
+- ✅ **Perspective transformation** - Professional-quality warping and placement
+- ✅ **Color adjustment system** - 15 Photoshop-style adjustments (-100 to +100 scale)
+- ✅ **Smart object coordination** - Precise placement using extracted coordinates
 
-## 🎯 What It Does
+#### **What Was Improved:**
+- 🚀 **Direct database integration** - Works with any platform that can send API requests
+- 🚀 **Cloud-native processing** - Direct image URLs, no local file management
+- 🚀 **Memory efficient** - Runs on 512MB RAM or scales to high-performance servers
+- 🚀 **True bulk processing** - Generate hundreds of mockups automatically
+- 🚀 **Affordable API access** - No $150K enterprise licensing required
 
-This system takes product artwork and automatically places it onto mockup templates (like t-shirts, posters, etc.) with realistic perspective warping and intelligent color blending. It's designed for print-on-demand and marketing teams who need to generate hundreds of mockups quickly.
+### **Key Innovation: The Three-Asset System**
 
-**Input:** Product artwork + PSD mockup template
-**Output:** Photorealistic product mockups in multiple aspect ratios
+The breakthrough is separating **creative work** (done once in Photoshop) from **production work** (automated at scale):
+
+**Photoshop Prep** (Creative - Done Once):
+- Design mockup template with transparent cutout
+- Create color-corrected backing for realistic blending
+- Extract smart object coordinates
+
+**Automated Processing** (Production - Done Thousands of Times):
+- Send artwork URL via API
+- Get professional mockup back instantly
+- Perfect color matching and perspective
+
+### **Built for the Art Prints Industry**
+
+This approach is **optimized for rectangular print placement** - perfect for:
+- Art prints and posters
+- T-shirt and apparel designs  
+- Product mockups for e-commerce
+- Marketing material variations
+- Print-on-demand businesses
+
+Instead of fighting Photoshop's limitations, we extracted its core strengths into a system designed for modern, database-driven workflows. You get Photoshop-quality results with the convenience of a simple API call.
 
 ## ✨ Key Features
 
-### 🎨 Advanced Color Processing
-- **Photoshop-Style Blend Modes**: Multiply and luminosity blending with vectorized processing
+### 🎨 Advanced Image Processing
+- **Photoshop-Style Blend Modes**: Multiply and luminosity blending with vectorized NumPy processing
 - **Adaptive Color Adjustments**: 15 different adjustment types (brightness, contrast, saturation, warmth, etc.)
-- **Color Analysis Pipeline**: Automatic analysis of artwork colors for optimal blending
+- **Intelligent Color Analysis**: Automatic artwork color analysis for optimal blending
 - **Smart Opacity Control**: Per-layer opacity with alpha compositing
 
-### 🔄 Intelligent Image Processing
+### 🔄 Geometric Transformation
 - **Perspective Transformation**: Warps artwork to match mockup perspective using OpenCV
 - **Smart Object Coordination**: Extracts placement coordinates from PSD files
 - **Multi-Aspect Ratio Support**: Generates 1:1, 4:5, and 9:16 versions simultaneously
-- **Memory-Optimized Processing**: Handles large images (6000px+) with tiled processing
+- **Edge Smoothing**: Anti-aliasing for professional results
 
 ### 🏗️ Production-Ready Architecture
-- **Scalable Processing**: Chunked processing for memory efficiency
-- **S3 Integration**: Automatic file storage and URL generation
-- **Airtable Automation**: Complete workflow integration
+- **Scalable Processing**: Chunked processing for memory efficiency (512MB - 16GB+ RAM)
+- **Vectorized Operations**: NumPy-based processing for maximum performance
 - **Error Recovery**: Comprehensive error handling and fallbacks
+- **Memory Optimization**: Aggressive cleanup and garbage collection
 
-## 🔬 Technical Evolution
+## 🔧 How It Works
 
-### Version 1.0 - Basic Color Matching
-The initial version used simple color analysis to determine blend parameters:
-- Basic RGB analysis of artwork and background regions
-- Simple brightness/contrast adjustments
-- Manual blend mode selection
+### **The Three-Asset System**
 
-### Version 1.5 - Intelligent Color Analysis
-Enhanced the system with sophisticated color analysis:
-- **Surrounding Region Analysis**: Extracted colors from areas around the mockup placement
-- **Color Temperature Detection**: Automatic warm/cool color analysis
-- **Adaptive Blend Strength**: Dynamic opacity based on color contrast
-- **Monochrome Detection**: Special handling for black/white artwork
+The engine requires three pre-processed assets to generate mockups:
 
-### Version 2.0 - Photoshop Integration (Current)
-Complete rewrite with professional-grade image processing:
-- **Vectorized Blend Modes**: NumPy-based multiply and luminosity blending
-- **Photoshop-Style Adjustments**: 15 adjustment types with -100 to +100 scales
-- **White Backing System**: Professional multiply blend workflow
-- **Tiled Processing**: Memory-efficient processing of large images
-- **Global Settings**: Configurable luminosity blend strength
+#### **1. Background Template**
+- Your mockup background with a **transparent cutout** where artwork will be placed
+- Can include overlays like reflections, shadows, or textures
+- Overlay elements should have reduced opacity in the PNG for realism
+- Example: T-shirt mockup with transparent area where design goes
 
-## 🏛️ Architecture
-┌─────────────────┐    ┌──────────────────┐    ┌─────────────────┐
-│   Airtable      │───▶│   Flask API      │───▶│   S3 Storage    │
-│   Automation    │    │   (app.py)       │    │   (Final Files) │
-└─────────────────┘    └──────────────────┘    └─────────────────┘
-│
-▼
-┌──────────────────────┐
-│   ArtworkProcessor   │
-│   (processor.py)     │
-└──────────────────────┘
-│
-┌───────────────────┼───────────────────┐
-▼                   ▼                   ▼
-┌──────────────┐  ┌─────────────────┐  ┌──────────────────┐
-│  Geometric   │  │  TiledBlend     │  │  PhotoshopColor  │
-│  Processor   │  │  Processor      │  │  Adjustments     │
-└──────────────┘  └─────────────────┘  └──────────────────┘
+#### **2. Color-Corrected Backing**
+- A white backing that's been **color-corrected in Photoshop** to match the background
+- This is the secret sauce - the backing captures the lighting and color environment
+- The engine uses **multiply blend mode** on this backing to make artwork colors look realistic
+- Essential for proper color integration with the background
 
-## 🚀 Quick Start
+#### **3. Original Artwork**
+- Your product design or artwork to be placed
+- Can be any resolution - the engine handles scaling and perspective transformation
+- Works best with **direct image links** (AWS S3, Google Cloud, etc.)
 
-### Prerequisites
-- Python 3.8+
-- AWS S3 bucket for file storage
-- Airtable account (optional)
+### **Processing Pipeline**
 
-### Installation
+1. **Perspective Transform**: Warps artwork to match mockup perspective using OpenCV
+2. **Multiply Blend**: Applies Photoshop-style multiply blend with the color-corrected backing
+3. **Luminosity Refinement**: Optional secondary blend for color enhancement (default 20% strength)
+4. **Color Adjustments**: 15 Photoshop-style adjustments (brightness, contrast, etc.)
+5. **Final Compositing**: Layers everything with the background template
 
-1. **Clone the repository**
-```
-git clone https://github.com/yourusername/ad-mockup-generator.git
-cd ad-mockup-generator
-```
+### **Memory Efficiency**
+- **Tiled Processing**: Large images processed in small chunks to minimize RAM usage
+- **Garbage Collection**: Aggressive memory cleanup between operations
+- **Intelligent Scaling**: Adapts processing based on available system resources
+- **Scalable Performance**: From 512MB to 16GB+ RAM automatically
 
-2. **Install dependencies**
-```
-pip install -r requirements.txt
-```
+## 🎨 Photoshop Workflow Guide
 
-3.Set up environment variables
-```
-cp .env.example .env
-# Edit .env with your actual credentials
-```
+### Setting Up Your Template
 
-4. Run the application
-```
-python app.py
-```
+#### Create Background with Transparent Cutout
+- Design your mockup background (t-shirt, poster frame, etc.)
+- Use layer masks to create transparent area where artwork will be placed
+- Add realistic overlays (reflections, shadows, fabric texture)
+- Reduce overlay opacity (20-40%) for subtle realism
 
-The API will be available at http://localhost:5000
+#### Color-Correct the Backing
+- Create a white layer beneath your background
+- Apply color correction to match the background's lighting environment
+- Consider ambient light color, shadows, and surface properties
+- This backing is crucial for realistic color blending
 
-📡 API Reference
-Core Endpoints
-- POST /process-mockup
-  - Generates mockups with advanced color processing.
-  - Request Body:
-    json{
-      "template_name": "T-Shirt Mockup",
-      "backgrounds": {
-        "1:1": "https://s3.amazonaws.com/bucket/background-1x1.png",
-        "4:5": "https://s3.amazonaws.com/bucket/background-4x5.png"
-      },
-      "coordinates": {
-        "1:1": "{\"coordinates\": {\"Print1\": [[100,100], [200,100], [200,200], [100,200]]}, \"blend_modes\": {\"Print1\": {\"blend_mode\": \"multiply\", \"opacity\": 255}}}"
-      },
-      "artworks": {
-        "Print1": "https://s3.amazonaws.com/bucket/artwork.png"
-      },
-      "white_backings": {
-        "1:1": "https://s3.amazonaws.com/bucket/white-backing-1x1.png"
-      },
-      "manual_adjustments_json": "{\"Print1\": {\"brightness\": 10, \"contrast\": 5}}",
-      "record_id": "rec123456",
-      "use_local_mockup": true,
-      "intelligent_scaling": true
-    }
-    Response:
-    json{
-      "success": true,
-      "message": "Mockup processing complete with Photoshop blend modes",
-      "processing_time_seconds": 45.2,
-      "results": {
-        "mockup_urls": {
-          "1:1": "https://s3.amazonaws.com/bucket/final-mockup.jpg"
-        },
-        "warped_artworks": {
-          "1:1": {
-            "Print1": "https://s3.amazonaws.com/bucket/warped-artwork.png"
-          }
-        }
-      }
-    }
-- GET /health
-  - System health check with memory usage.
+#### Extract Smart Object Coordinates
+- Use the included PSD coordinate extractor (`utils/psd_extractor.py`)
+- Identifies placement points for perspective transformation
+- Exports JSON with exact coordinates and blend mode settings
 
-- GET /mockup-info
-  - System capabilities and version information.
+### Why This Approach Works
+- **Separates creative from production**: Design once, generate thousands
+- **Maintains Photoshop quality**: Same blend modes and color science
+- **Optimized for rectangular prints**: Perfect for art prints, posters, designs
+- **Industry-proven**: Based on professional print production workflows
 
-- POST /generate-default-adjustments
-  - Generates default color adjustment JSON for artwork layers.
-
-
-## 🎨 Color Adjustment System
+## 🎯 Color Adjustment System
 **The system uses Photoshop-style adjustments with a -100 to +100 scale:**
 
 - Basic Adjustments:
@@ -230,27 +189,47 @@ Core Endpoints
     }
   }
 
-### 🔧 Configuration
-#### Environment Variables
+## 🔗 Integration Examples
 
-| Variable | Description | Example |
-|----------|-------------|---------|
-| `S3_BUCKET_NAME` | AWS S3 bucket for file storage | `my-mockup-bucket` |
-| `AWS_REGION` | AWS region | `us-east-1` |
-| `AWS_ACCESS_KEY_ID` | AWS access key | `AKIA...` |
-| `AWS_SECRET_ACCESS_KEY` | AWS secret key | `secret...` |
-| `AIRTABLE_API_KEY` | Airtable API key | `key...` |
-| `AIRTABLE_BASE_ID` | Airtable base ID | `app...` |
-| `AIRTABLE_TABLE_NAME` | Airtable table name | `Ad Mockups` |
-| `RENDERFORM_API_KEY` | Renderform API key (optional) | `rf_...` |
-| `RENDERFORM_TEMPLATE_ID` | Default Renderform template ID | `tpl_...` |
-| `RENDERFORM_TEMPLATE_ID_1_1` | 1:1 aspect ratio template ID | `tpl_...` |
-| `RENDERFORM_TEMPLATE_ID_4_5` | 4:5 aspect ratio template ID | `tpl_...` |
-| `RENDERFORM_TEMPLATE_ID_9_16` | 9:16 aspect ratio template ID | `tpl_...` |
-| `SECRET_KEY` | Flask secret key | `your-secret-key-here` |
-| `DEBUG` | Flask debug mode | `False` |
-| `PORT` | Application port | `5000` |
+This engine works with any platform that can send API requests:
 
+### Database + Automation Platforms
+- **Airtable** (my production setup) - Visual interface with automation scripts
+- **Monday.com** - Project management with custom workflows
+- **Google Sheets** - Simple spreadsheet-driven automation
+- **Notion** - Database with API integration
+- **Zapier/Make** - Connect to hundreds of other tools
+
+### E-commerce Platforms
+- **Shopify** - Automated product mockup generation
+- **WooCommerce** - WordPress integration via custom plugins
+- **Etsy** - Bulk mockup creation for listings
+
+
+🏗️ Architecture
+┌─────────────────┐    ┌──────────────────┐    ┌─────────────────┐
+│   Database      │───▶│   MockupEngine   │───▶│   Final Mockup │
+│   (Airtable,    │    │   (Core Pipeline)│    │   (S3/Local)    │
+│   Sheets, etc.) │    └──────────────────┘    └─────────────────┘
+└─────────────────┘             │
+                                ▼
+                    ┌──────────────────────┐
+                    │   Processing Modules │
+                    └──────────────────────┘
+                                │
+            ┌───────────────────┼───────────────────┐
+            ▼                   ▼                   ▼
+    ┌──────────────┐  ┌─────────────────┐  ┌──────────────────┐
+    │  Geometric   │  │  Photoshop      │  │  Memory-Efficient│
+    │  Processor   │  │  Blend Modes    │  │  Compositor      │
+    └──────────────┘  └─────────────────┘  └──────────────────┘
+
+## 🧩 Core Components
+
+- `core/mockup_engine.py` – Main processing pipeline with transforms and adjustments  
+- `core/mockup_compositor.py` – Memory-efficient mockup composition & scaling  
+- `core/layer_assembly.py` – Compositing and layer logic  
+- `utils/psd_extractor.py` – PSD smart object coordinate extraction
 
 🎯 Use Cases
 Print-on-Demand
@@ -268,21 +247,17 @@ E-commerce
   - Consistent mockup styling across catalogs.
   - Automated workflow integration
 
+
 📊 Performance
   - Memory Optimization: Tiled processing handles 6000px+ images
-  - Processing Speed: ~45 seconds for full multi-aspect ratio generation
+  - Processing Speed: ~30 seconds per image generation (at 512 MB RAM and 0.5 CPU)
   - File Sizes: Intelligent scaling produces 8-10MB final files
   - Quality: 98% JPEG quality with 300 DPI output
 
-🤝 Contributing
-  - Fork the repository
-  - Create a feature branch (git checkout -b feature/amazing-feature)
-  - Commit your changes (git commit -m 'Add amazing feature')
-  - Push to the branch (git push origin feature/amazing-feature)
-  - Open a Pull Request
 
 📄 License
 This project is licensed under the MIT License - see the LICENSE file for details.
+
 🙏 Acknowledgments
 
 Built with Python, PIL, OpenCV, and NumPy
@@ -292,29 +267,3 @@ Thanks to the open-source image processing community
 
 For questions or support, please open an issue on GitHub.
 
-## 2. .env.example
-
-```bash
-# AWS S3 Configuration
-S3_BUCKET_NAME=your-s3-bucket-name
-AWS_REGION=your-aws-region
-AWS_ACCESS_KEY_ID=your-aws-access-key
-AWS_SECRET_ACCESS_KEY=your-aws-secret-access-key
-
-# Airtable Configuration
-AIRTABLE_API_KEY=your-airtable-api-key
-AIRTABLE_BASE_ID=your-airtable-base-id
-AIRTABLE_TABLE_NAME=Your Table Name
-
-# Renderform Configuration (Optional)
-RENDERFORM_API_KEY=your-renderform-api-key
-RENDERFORM_TEMPLATE_ID=your-default-template-id
-RENDERFORM_TEMPLATE_ID_1_1=your-1-1-template-id
-RENDERFORM_TEMPLATE_ID_4_5=your-4-5-template-id
-RENDERFORM_TEMPLATE_ID_9_16=your-9-16-template-id
-
-# Flask Configuration
-SECRET_KEY=your-secret-key-here-make-it-long-and-random
-DEBUG=False
-PORT=5000
-```
