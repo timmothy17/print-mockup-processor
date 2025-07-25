@@ -113,7 +113,7 @@ The engine requires three pre-processed assets to generate mockups:
 
 1. **Perspective Transform**: Warps artwork to match mockup perspective using OpenCV
 2. **Multiply Blend**: Applies Photoshop-style multiply blend with the color-corrected backing
-3. **Luminosity Refinement**: Optional secondary blend for color enhancement (default 20% strength)
+3. **Luminosity Refinement**: Optional secondary blend for color enhancement (default 20% strength as this was found to be most optimal across a wide range of tests)
 4. **Color Adjustments**: 15 Photoshop-style adjustments (brightness, contrast, etc.)
 5. **Final Compositing**: Layers everything with the background template
 
