@@ -123,6 +123,20 @@ The engine requires three pre-processed assets to generate mockups:
 - **Intelligent Scaling**: Adapts processing based on available system resources
 - **Scalable Performance**: From 512MB to 16GB+ RAM automatically
 
+### Prerequisites
+- Python 3.8+
+- PIL/Pillow for image processing
+- OpenCV for perspective transformations
+- NumPy for vectorized operations
+- 512MB+ RAM (Minimum recommended)
+
+### Why Direct Image Links Work Best
+
+- AWS S3, Google Cloud, Cloudinary: Reliable, fast access
+- No file upload limits: Process any size image
+- Global CDN: Fast access from anywhere
+- Automatic scaling: Cloud storage handles traffic spikes
+
 ## 🎨 Photoshop Workflow Guide
 
 ### Setting Up Your Template
@@ -133,7 +147,7 @@ The engine requires three pre-processed assets to generate mockups:
 - Add realistic overlays (reflections, shadows, fabric texture)
 - Reduce overlay opacity (20-40%) for subtle realism
 
-#### Color-Correct the Backing
+#### Colour-Correct the Backing
 - Create a white layer beneath your background
 - Apply color correction to match the background's lighting environment
 - Consider ambient light color, shadows, and surface properties
