@@ -1,6 +1,42 @@
-# Ad Mockup Generator
+# Print Mockup Processor
 
 A sophisticated automated system for generating product mockups with intelligent color matching, Photoshop-style blend modes, and perspective transformation. Built for high-volume production workflows with Airtable integration.
+
+## 🎯 Motivation & Problem
+
+### **The Photoshop Scripting Limitation**
+
+While Photoshop scripting can automate mockup generation, it quickly becomes impractical for production use:
+
+- **Local File Management**: Hundreds of artwork files need to be downloaded and managed locally
+- **Database Disconnect**: No easy way to connect Photoshop scripts to modern databases and workflows
+- **Resource Intensive**: Photoshop requires significant RAM and processing power for each operation
+- **Enterprise API Barrier**: Adobe's Creative SDK API requires enterprise licensing with a minimum spend of $150,000+ USD
+- **Scalability Issues**: Running Photoshop instances for bulk processing is expensive and unreliable
+- **No Cloud Integration**: Difficult to integrate with cloud storage and modern web workflows
+
+
+### **The Solution**
+This engine extracts the **core capabilities of Photoshop's multiply blend mode and print placement** into a lightweight, automated system that:
+- **Preserves quality**: Uses the same mathematical blend modes as Photoshop
+- **Scales infinitely**: Process hundreds of mockups automatically
+- **Works anywhere**: Runs on 512MB RAM or scales to high-performance servers
+- **Integrates easily**: Works with any system that can send API requests
+
+### **Key Innovation**
+The breakthrough is separating the **creative work** (done once in Photoshop) from the **production work** (automated at scale):
+
+1. **Photoshop Prep** (Creative - Done Once):
+   - Design your mockup template
+   - Create color-corrected backing
+   - Set up smart object coordinates
+
+2. **Automated Processing** (Production - Done Thousands of Times):
+   - Drop in any artwork
+   - Generate professional mockup instantly
+   - Perfect color matching and perspective
+
+This approach is **optimized for the art prints industry** where rectangular prints need to be placed on various backgrounds with realistic color blending.
 
 ## 🎯 What It Does
 
