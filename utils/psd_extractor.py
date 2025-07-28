@@ -9,6 +9,12 @@ import logging
 import json
 from psd_tools import PSDImage
 from pathlib import Path
+import tkinter as tk
+from tkinter import filedialog
+
+# Hide the root window
+root = tk.Tk()
+root.withdraw()
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -157,6 +163,62 @@ def extract_smart_object_coordinates(psd_path):
         }
         
         logger.info(f"Successfully extracted coordinates and blend modes for {len(coordinates)} smart objects")
+
+        # Additional extraction for LUMREF and FILLREF
+        lumref_opacity = None
+        fillref_rgb = None
+
+        for layer in psd.descendants():
+            if hasattr(layer, 'name') and layer.name == 'LUMREF':
+                lumref_opacity = getattr(layer, 'opacity', None)
+
+            if hasattr(layer, 'name') and layer.name == 'FILLREF':
+                try:
+                    # Try direct solid_color attribute
+                    if hasattr(layer, 'solid_color') and layer.solid_color:
+                        color = layer.solid_color
+                        fillref_rgb = {
+                            "r": int(round(color.red)),
+                            "g": int(round(color.green)),
+                            "b": int(round(color.blue))
+                        }
+                    # Fallback: try adjustment data
+                    elif hasattr(layer, 'adjustment') and isinstance(layer.adjustment, list):
+                        adj = layer.adjustment[0]
+                        if all(k in adj for k in ['red', 'green', 'blue']):
+                            fillref_rgb = {
+                                "r": int(round(adj['red'])),
+                                "g": int(round(adj['green'])),
+                                "b": int(round(adj['blue']))
+                            }
+                    else:
+                        try:
+                            pil_image = layer.topil()
+                            if pil_image.mode in ('RGB', 'RGBA'):
+                                r, g, b = pil_image.convert('RGB').getpixel((0, 0))
+                                fillref_rgb = {"r": r, "g": g, "b": b}
+                                logger.info(f"Extracted fillref color from pixel: {fillref_rgb}")
+                            else:
+                                logger.warning("FILLREF image mode is not RGB/RGBA.")
+                        except Exception as px:
+                            logger.warning(f"Failed to extract pixel color from FILLREF: {px}")
+                except Exception as e:
+                    logger.warning(f"Error extracting color from FILLREF: {e}")
+
+        # Include in result or raise error
+        extras = {}
+        if lumref_opacity is not None:
+            extras['lumref_opacity'] = lumref_opacity
+        else:
+            return {"error": "Layer 'LUMREF' not found"}
+
+        if fillref_rgb is not None:
+            extras['fillref_rgb'] = fillref_rgb
+        else:
+            return {"error": "Layer 'FILLREF' not found or not a solid color fill"}
+
+        # Merge with main result
+        result.update(extras)
         return result
         
     except Exception as e:
@@ -225,7 +287,11 @@ def extract_coordinates_only(psd_path):
 if __name__ == "__main__":
     # Example: Extract coordinates from a PSD file
     # Replace with your actual PSD file path
-    psd_file = "path/to/your/template.psd"
+    initial_dir = r"E:\Drool\Mockups\Mockup Generator\Generator PSDs"
+    psd_file = filedialog.askopenfilename(
+    title="Select a file",
+    initialdir=initial_dir
+)
     
     # This will print the JSON output you need
     process_psd_file(psd_file)
