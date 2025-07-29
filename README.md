@@ -164,6 +164,10 @@ The engine requires three pre-processed assets to generate mockups:
 - **Optimized for rectangular prints**: Perfect for art prints, posters, designs
 - **Industry-proven**: Based on professional print production workflows
 
+### For Large PSD Files (Recommended Approach)
+
+Due to memory constraints in web applications, large PSD files should be processed locally:
+
 ## 🎯 Color Adjustment System
 **The system uses Photoshop-style adjustments with a -100 to +100 scale:**
 
@@ -223,8 +227,15 @@ This engine works with any platform that can send API requests:
 
 - `core/mockup_engine.py` – Main processing pipeline with transforms and adjustments  
 - `core/mockup_compositor.py` – Memory-efficient mockup composition & scaling  
-- `core/layer_assembly.py` – Compositing and layer logic  
-- `utils/psd_extractor.py` – PSD smart object coordinate extraction
+- `utils/psd_extractor.py` – PSD smart object coordinate extraction (run locally for large PSD files)
+
+### Architecture Notes
+
+**Memory-Optimized Processing**: The `mockup_compositor.py` handles all image layering through horizontal chunking, allowing processing of 6000px+ images on minimal RAM while maintaining quality.
+
+**Local PSD Processing**: For large PSD files (200MB+), `psd_extractor.py` should be run locally to avoid web application memory crashes. This script extracts smart object coordinates and exports them as JSON for the main processing pipeline.
+
+**Intelligent Compression**: The compositor automatically determines optimal file sizes and applies intelligent scaling (50%-100%) based on source dimensions to produce 8-10MB final files suitable for web use.
 
 🎯 Use Cases
 Print-on-Demand
