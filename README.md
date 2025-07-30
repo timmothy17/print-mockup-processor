@@ -1,6 +1,6 @@
 # Print Mockup Processor
 **Lightweight, RAM-scalable mockup processing engine for Photoshop-prepped assets.**
-*➡️ Check the sample_output/ folder to see real before/after examples.
+**➡️ Check the sample_output/ folder to see real before/after examples.**
 
 
 ## 🎯 Motivation & Problem
